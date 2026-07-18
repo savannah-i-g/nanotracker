@@ -19,6 +19,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── Third-party (pinned) ─────────────────────────────────────────────
+# CMake ≥ 4 removed compatibility with sub-3.5 minimums; miniz 3.0.2
+# (the last release) declares one. This floors dependency policies
+# without touching our own requirement above.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 include(FetchContent)
 
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)

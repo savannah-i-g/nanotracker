@@ -22,7 +22,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libopenal-dev libasound2-dev libx11-dev \
-            libgl1-mesa-dev xorg-dev python3-jinja2 libopenmpt-dev
+            libgl1-mesa-dev xorg-dev python3-jinja2 libopenmpt-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev
 
       - name: Compiler cache
         uses: hendrikmuhs/ccache-action@v1.2
