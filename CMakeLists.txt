@@ -278,6 +278,7 @@ add_executable(nanotracker
     ${NT_EDITOR_SURFACE_SOURCE}
     src/app/main.cpp
     src/app/input_script.cpp
+    src/app/midi_record.cpp
     src/app/pattern_ops.cpp
     src/app/project_session.cpp
     src/app/autosave.cpp
@@ -296,6 +297,7 @@ add_executable(nanotracker
     src/audio/audio_device_openal.cpp
     src/audio/audio_engine.cpp
     src/audio/decoders.cpp
+    src/audio/effect_midi.cpp
     src/audio/fx_chain.cpp
     src/audio/graph_runner.cpp
     src/audio/sample_buffer.cpp

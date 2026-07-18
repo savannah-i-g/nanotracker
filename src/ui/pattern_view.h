@@ -7,6 +7,7 @@
 // F5/F8 transport, Delete clears by field, space/= note-off).
 #pragma once
 
+#include "app/midi_record.h"
 #include "app/pattern_ops.h"
 #include "app/project_session.h"
 #include "audio/audio_engine.h"
@@ -14,11 +15,25 @@
 
 namespace nt::ui {
 
-class PatternView {
+class PatternView : public app::PatternCursor {
 public:
     // Draws the window and processes editing input while focused.
     void draw(app::ProjectSession& session, const audio::EngineSnapshot& snapshot,
               const Theme& theme);
+
+    // app::PatternCursor — the MIDI step-entry surface. Coordinates
+    // mirror the last drawn frame (active_pattern_/active_rows_ are
+    // cached in draw()); step_advance is the keyboard edit-step
+    // advance, so MIDI step entry lands and moves exactly like typing.
+    [[nodiscard]] int step_pattern() const override { return active_pattern_; }
+
+    [[nodiscard]] int step_row() const override { return cursor_.row; }
+
+    [[nodiscard]] int step_channel() const override { return cursor_.channel; }
+
+    [[nodiscard]] int step_entry_slot() const override { return selected_slot_; }
+
+    void step_advance() override { advance_cursor_down(active_rows_); }
 
 private:
     struct Cursor {
@@ -62,6 +77,11 @@ private:
     int selected_slot_ = 1;
     int edit_pattern_ = 0; // pattern being edited (order-list selection)
     int visible_rows_ = 20;
+    // Pattern the cursor writes to this frame (edit_pattern_, or the
+    // playhead pattern while playing) and its row count — cached by
+    // draw() for the PatternCursor surface.
+    int active_pattern_ = 0;
+    int active_rows_ = 64;
 };
 
 } // namespace nt::ui

@@ -58,9 +58,12 @@ struct ResolvedEnd {
 // Maps a web jackIndex onto a stable port id using the web's
 // historical tracker-bus layouts (see header). `want` is the stored
 // kind when the snapshot has one — it arbitrates between layouts.
+// The native bus now carries the full v5 layout ([audio, vol cv,
+// midi] per channel + trailing master.midi), so every era resolves to
+// a live port.
 ResolvedEnd resolve_bus_output_by_index(const Node& bus, int jack_index,
                                         std::optional<PortKind> want) {
-    const int channels = static_cast<int>(bus.outputs.size()) / 2;
+    const int channels = static_cast<int>(bus.outputs.size()) / 3;
 
     struct Candidate {
         int channel;
@@ -91,15 +94,17 @@ ResolvedEnd resolve_bus_output_by_index(const Node& bus, int jack_index,
         if (want.has_value() && *want != kind) {
             continue;
         }
-        if (kind == PortKind::kMidi) {
-            // MIDI ports exist in the snapshot's world but not in the
-            // native bus yet — the cable stays dormant.
-            return {.state = ResolvedEnd::State::kDormant, .end = {}, .why = {}};
+        if (c.role == 3) {
+            return {.state = ResolvedEnd::State::kOk,
+                    .end = {.node_id = bus.workspace_id,
+                            .port_id = bus.outputs[static_cast<std::size_t>(channels) * 3].id},
+                    .why = {}};
         }
         if (c.channel < 0 || c.channel >= channels) {
             continue;
         }
-        const std::size_t index = (static_cast<std::size_t>(c.channel) * 2) + (c.role == 1 ? 1 : 0);
+        const std::size_t index =
+            (static_cast<std::size_t>(c.channel) * 3) + static_cast<std::size_t>(c.role);
         return {.state = ResolvedEnd::State::kOk,
                 .end = {.node_id = bus.workspace_id, .port_id = bus.outputs[index].id},
                 .why = {}};
@@ -127,7 +132,10 @@ ResolvedEnd resolve_endpoint(const WorkspaceGraph& graph, const json& endpoint, 
                     .end = {.node_id = workspace_id, .port_id = port_id},
                     .why = {}};
         }
-        if (port_id.find(".midi") != std::string::npos || port_id == "master.midi") {
+        if (want == PortKind::kMidi) {
+            // Midi ports the native node set doesn't expose (the web's
+            // implicit "midi-thru"/"midi-out" adapter ports) — keep
+            // the cable dormant so projects round-trip losslessly.
             return {.state = ResolvedEnd::State::kDormant, .end = {}, .why = {}};
         }
         return {.state = ResolvedEnd::State::kDropped,
@@ -143,8 +151,15 @@ ResolvedEnd resolve_endpoint(const WorkspaceGraph& graph, const json& endpoint, 
     }
     if (node->kind == NodeKind::kTrackerBus) {
         if (!is_source) {
-            // The bus's only web-era input is master.midi.in.
-            return {.state = ResolvedEnd::State::kDormant, .end = {}, .why = {}};
+            // The bus's only input, in every era: master.midi.in.
+            if (!node->inputs.empty()) {
+                return {.state = ResolvedEnd::State::kOk,
+                        .end = {.node_id = workspace_id, .port_id = node->inputs.front().id},
+                        .why = {}};
+            }
+            return {.state = ResolvedEnd::State::kDropped,
+                    .end = {},
+                    .why = "tracker bus has no inputs"};
         }
         return resolve_bus_output_by_index(*node, jack_index, want);
     }
@@ -187,6 +202,12 @@ WpbrAdoptResult adopt_wpbr_json(WorkspaceGraph& graph, const std::string& payloa
             // Native-authored utility node — recreate it.
             node = &graph.add_node(make_utility_sum_node(workspace_id));
         }
+        if (node == nullptr && plugin_id == "builtin:ext-midi-in") {
+            node = &graph.add_node(make_ext_midi_in_node(workspace_id));
+        }
+        if (node == nullptr && plugin_id == "builtin:ext-midi-out") {
+            node = &graph.add_node(make_ext_midi_out_node(workspace_id));
+        }
         if (node == nullptr) {
             // Plugin instrument awaiting its stage: carry verbatim.
             result.dormant.instruments.push_back(inst.dump());
@@ -211,10 +232,6 @@ WpbrAdoptResult adopt_wpbr_json(WorkspaceGraph& graph, const std::string& payloa
         }
         if (cable.contains("dstKind") && cable["dstKind"].is_string()) {
             dst_kind = kind_from_name(cable["dstKind"].get<std::string>());
-        }
-        if (src_kind == PortKind::kMidi || dst_kind == PortKind::kMidi) {
-            result.dormant.cables.push_back(cable.dump());
-            continue;
         }
         const ResolvedEnd src = resolve_endpoint(graph, cable["source"], true, src_kind);
         const ResolvedEnd dst = resolve_endpoint(graph, cable["dest"], false, dst_kind);

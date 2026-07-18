@@ -84,6 +84,31 @@ NtpInstance::NtpInstance(const LoadedNtpPlugin& plugin, std::uint32_t rate)
         set_param(key, value);
     }
 
+    // Pre-resolve CV→param targets (plugin_set_param_cv writes these
+    // ParamSlot pointers on the audio thread; slot storage is fixed
+    // after construction, so the pointers stay valid).
+    cv_targets_.resize(host_params_.size());
+    for (std::size_t p = 0; p < manifest.params.size(); ++p) {
+        CvParamTarget& target = cv_targets_[p];
+        target.min = static_cast<float>(manifest.params[p].min);
+        target.max = static_cast<float>(manifest.params[p].max);
+        const std::string& key = manifest.params[p].key;
+        const auto dot = key.find('.');
+        if (dot == std::string::npos) {
+            continue; // bare key: host param value only ("param:" routes)
+        }
+        const int node_index = node_index_by_id(key.substr(0, dot));
+        if (node_index < 0) {
+            continue;
+        }
+        const std::string param_name = key.substr(dot + 1);
+        for (NodeInstantiation& slot : nodes_[static_cast<std::size_t>(node_index)].slots) {
+            if (ParamSlot* param = slot.runtime->find_param(param_name.c_str())) {
+                target.slots.push_back(param);
+            }
+        }
+    }
+
     // Flatten mod routes.
     for (const ntp::ModRoute& route : manifest.graph.mod_routes) {
         for (const ntp::ModTarget& target : route.targets) {
@@ -263,6 +288,18 @@ float NtpInstance::param_value(const std::string& key) const {
         }
     }
     return 0.0F;
+}
+
+void NtpInstance::plugin_set_param_cv(int param_index, float value01) {
+    if (param_index < 0 || param_index >= static_cast<int>(cv_targets_.size())) {
+        return;
+    }
+    const CvParamTarget& target = cv_targets_[static_cast<std::size_t>(param_index)];
+    const float value = target.min + (value01 * (target.max - target.min));
+    host_params_[static_cast<std::size_t>(param_index)].second = value;
+    for (ParamSlot* slot : target.slots) {
+        slot->base = value;
+    }
 }
 
 void NtpInstance::apply_preset(const ntp::Preset& preset) {

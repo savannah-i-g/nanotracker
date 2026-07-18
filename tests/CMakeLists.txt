@@ -25,16 +25,19 @@ add_executable(nt_tests
     ntp_test.cpp
     clap_host_test.cpp
     midi_test.cpp
+    midi_record_test.cpp
     ftrk_writer_test.cpp
     export_test.cpp
     export_suite_test.cpp
     export_presets_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/midi_record.cpp
     ${CMAKE_SOURCE_DIR}/src/app/pattern_ops.cpp
     ${CMAKE_SOURCE_DIR}/src/app/project_session.cpp
     ${CMAKE_SOURCE_DIR}/src/app/undo.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/audio_device_openal.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/audio_engine.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/decoders.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/effect_midi.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/fx_chain.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/graph_runner.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/sample_buffer.cpp

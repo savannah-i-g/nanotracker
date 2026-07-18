@@ -1,11 +1,17 @@
 // midi/midi_io — RtMidi device management and input. Behavioural
 // reference: the web's WebMIDI layer (trackerMidi.ts, midiBus.ts);
 // representation is native. Input runs on RtMidi's own callback thread
-// and lands in a lock-free ring the UI thread drains once per frame —
-// note entry, MIDI-learn and parameter mappings all consume from
-// there. Output lives in midi_out_thread (PLL against audio time).
+// and lands in TWO lock-free rings: the UI ring the main loop drains
+// once per frame (note entry, MIDI-learn, parameter mappings) and the
+// graph ring the audio engine drains once per block for Ext MIDI In
+// nodes (wired via AudioEngine::set_ext_midi_source). Separate rings
+// keep both consumers single — SPSC discipline — and let the UI keep
+// its byte-level MidiEvent shape while the graph gets the cable
+// transport's MidiMessage. Output lives in midi_out_thread (PLL
+// against audio time).
 #pragma once
 
+#include "audio/midi_event.h"
 #include "rt/spsc_queue.h"
 
 #include <cstdint>
@@ -47,12 +53,19 @@ public:
     // UI thread: drain pending events (bounded per call).
     bool poll(MidiEvent& out);
 
+    // The graph-facing ring (note on/off, CC, pitch bend as cable
+    // messages; frame stamps are assigned by the engine's per-block
+    // drain). Hand to AudioEngine::set_ext_midi_source — the audio
+    // thread is the single consumer.
+    [[nodiscard]] rt::SpscQueue<audio::MidiMessage>& graph_ring() { return graph_events_; }
+
 private:
     static void rtmidi_callback(double delta, std::vector<unsigned char>* message, void* user_data);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
     rt::SpscQueue<MidiEvent> events_{512};
+    rt::SpscQueue<audio::MidiMessage> graph_events_{512};
     bool open_ = false;
 };
 

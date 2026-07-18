@@ -75,6 +75,12 @@ public:
     void process_block(const float* in, float* out, std::uint32_t frames) override;
     void plugin_note_on(int note, float velocity) override;
     void plugin_note_off(int note) override;
+    // CV→param: param_index into params(); VST3 params are already
+    // normalized 0..1, so value01 passes through. Staged like notes
+    // (bounded audio-thread vector) and delivered as parameter changes
+    // at the next block head; the main-thread cache/controller are
+    // untouched — CV modulation is transient.
+    void plugin_set_param_cv(int param_index, float value01) override;
 
     // ── Main thread ──────────────────────────────────────────────────
     [[nodiscard]] const std::string& name() const { return name_; }
@@ -113,7 +119,8 @@ private:
     std::vector<Vst3ParamInfo> params_;
     std::vector<std::pair<std::uint32_t, double>> param_cache_;
     rt::SpscQueue<ParamChange> param_changes_{128};
-    std::vector<NoteEvent> pending_notes_; // audio-thread staging
+    std::vector<NoteEvent> pending_notes_;       // audio-thread staging
+    std::vector<ParamChange> pending_cv_params_; // audio-thread staging
 };
 
 // Standard VST3 locations (~/.vst3, /usr/lib/vst3, /usr/local/lib/vst3).

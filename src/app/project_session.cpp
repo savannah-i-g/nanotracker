@@ -381,6 +381,39 @@ graph::Node make_plugin_graph_node(const ntp::Manifest& manifest, const std::str
         node.outputs.push_back(
             {.id = port.id, .label = port.label, .kind = graph_kind_from(port.kind)});
     }
+    // Implicit midi-in for instruments (web v5: instrument adapters
+    // grew a "midi-in" port unless the manifest declared its own).
+    // Appended after manifest ports so legacy jackIndex snapshots keep
+    // resolving positionally.
+    if (manifest.type == ntp::PluginType::kInstrument &&
+        graph::find_input(node, "midi-in") == nullptr) {
+        bool has_midi_in = false;
+        for (const graph::Port& port : node.inputs) {
+            has_midi_in = has_midi_in || port.kind == graph::PortKind::kMidi;
+        }
+        if (!has_midi_in) {
+            node.inputs.push_back(
+                {.id = "midi-in", .label = "MIDI IN", .kind = graph::PortKind::kMidi});
+        }
+    }
+    // CV param ports: one CV input per host param (first
+    // kMaxPluginCvParamPorts), port id = the param's dot-path key —
+    // the web's cv-port `target` convention. param_ref indexes the
+    // manifest param list for the binding's RT setter.
+    int generated = 0;
+    for (std::size_t p = 0; p < manifest.params.size() && generated < graph::kMaxPluginCvParamPorts;
+         ++p) {
+        const ntp::ParamDef& param = manifest.params[p];
+        if (graph::find_input(node, param.key) != nullptr) {
+            continue; // a manifest port already owns this id
+        }
+        node.inputs.push_back({.id = param.key,
+                               .label = param.label.empty() ? param.key : param.label,
+                               .kind = graph::PortKind::kCv,
+                               .channel_ref = -1,
+                               .param_ref = static_cast<int>(p)});
+        ++generated;
+    }
     return node;
 }
 
@@ -670,6 +703,26 @@ std::string ProjectSession::add_clap_node(const std::string& plugin_id) {
                 node.inputs.push_back({.id = "in", .label = "IN", .kind = graph::PortKind::kAudio});
             }
             node.outputs.push_back({.id = "main", .label = "OUT", .kind = graph::PortKind::kAudio});
+            if (instance->has_note_input()) {
+                node.inputs.push_back(
+                    {.id = "midi-in", .label = "MIDI IN", .kind = graph::PortKind::kMidi});
+            }
+            // CV param ports: port id = the CLAP param id in decimal
+            // (the spec's numeric-id convention); param_ref indexes
+            // instance->params() for the RT setter.
+            {
+                const std::vector<ext::ClapParamInfo>& params = instance->params();
+                const int cap =
+                    std::min(static_cast<int>(params.size()), graph::kMaxPluginCvParamPorts);
+                for (int p = 0; p < cap; ++p) {
+                    node.inputs.push_back(
+                        {.id = std::to_string(params[static_cast<std::size_t>(p)].id),
+                         .label = params[static_cast<std::size_t>(p)].name,
+                         .kind = graph::PortKind::kCv,
+                         .channel_ref = -1,
+                         .param_ref = p});
+                }
+            }
             workspace_.add_node(std::move(node));
             clap_by_node_[workspace_id] = instance.get();
             ext_path_by_node_[workspace_id] = library->path().string();
@@ -767,6 +820,30 @@ std::string ProjectSession::add_vst3_node(const std::string& class_id) {
                 node.inputs.push_back({.id = "in", .label = "IN", .kind = graph::PortKind::kAudio});
             }
             node.outputs.push_back({.id = "main", .label = "OUT", .kind = graph::PortKind::kAudio});
+            if (descriptor.is_instrument) {
+                node.inputs.push_back(
+                    {.id = "midi-in", .label = "MIDI IN", .kind = graph::PortKind::kMidi});
+            }
+            // CV param ports: automatable params only (driving a
+            // non-automatable VST3 param per block would violate the
+            // plugin's contract); port id = decimal param id,
+            // param_ref = the unfiltered params() index.
+            {
+                const std::vector<ext::Vst3ParamInfo>& params = instance->params();
+                int generated = 0;
+                for (std::size_t p = 0;
+                     p < params.size() && generated < graph::kMaxPluginCvParamPorts; ++p) {
+                    if (!params[p].automatable) {
+                        continue;
+                    }
+                    node.inputs.push_back({.id = std::to_string(params[p].id),
+                                           .label = params[p].title,
+                                           .kind = graph::PortKind::kCv,
+                                           .channel_ref = -1,
+                                           .param_ref = static_cast<int>(p)});
+                    ++generated;
+                }
+            }
             workspace_.add_node(std::move(node));
             vst3_by_node_[workspace_id] = instance.get();
             ext_path_by_node_[workspace_id] = module->path().string();
@@ -919,10 +996,49 @@ std::string ProjectSession::add_sum_node() {
     return workspace_id;
 }
 
+std::string ProjectSession::add_ext_midi_in_node() {
+    const std::string workspace_id = workspace_.next_node_id("emi");
+    workspace_.add_node(graph::make_ext_midi_in_node(workspace_id));
+    publish_graph();
+    ProjectSession* self = this;
+    undo_.push(
+        "add ext midi in",
+        [self, workspace_id] {
+            self->workspace_.remove_node(workspace_id);
+            self->publish_graph();
+        },
+        [self, workspace_id] {
+            self->workspace_.add_node(graph::make_ext_midi_in_node(workspace_id));
+            self->publish_graph();
+        });
+    return workspace_id;
+}
+
+std::string ProjectSession::add_ext_midi_out_node() {
+    const std::string workspace_id = workspace_.next_node_id("emo");
+    workspace_.add_node(graph::make_ext_midi_out_node(workspace_id));
+    publish_graph();
+    ProjectSession* self = this;
+    undo_.push(
+        "add ext midi out",
+        [self, workspace_id] {
+            self->workspace_.remove_node(workspace_id);
+            self->publish_graph();
+        },
+        [self, workspace_id] {
+            self->workspace_.add_node(graph::make_ext_midi_out_node(workspace_id));
+            self->publish_graph();
+        });
+    return workspace_id;
+}
+
 bool ProjectSession::remove_workspace_node(const std::string& workspace_id) {
     const graph::Node* node = workspace_.find_node(workspace_id);
-    if (node == nullptr ||
-        (node->kind != graph::NodeKind::kUtilitySum && node->kind != graph::NodeKind::kPlugin)) {
+    const bool removable =
+        node != nullptr &&
+        (node->kind == graph::NodeKind::kUtilitySum || node->kind == graph::NodeKind::kPlugin ||
+         node->kind == graph::NodeKind::kExtMidiIn || node->kind == graph::NodeKind::kExtMidiOut);
+    if (!removable) {
         return false; // built-in nodes are pinned
     }
     instances_by_node_.erase(workspace_id); // instance retires in the registry
@@ -1048,11 +1164,10 @@ bool ProjectSession::load_sample_into_slot(int slot, const std::filesystem::path
     // frames counts in the source-rate domain of original_data — the
     // resident buffer is device-rate, so its frame count belongs to a
     // different base than meta.sample_rate.
-    meta.frames = buffer->rate != 0
-                      ? static_cast<std::uint32_t>(std::llround(
-                            static_cast<double>(buffer->frames) *
-                            static_cast<double>(buffer->source_rate) / buffer->rate))
-                      : buffer->frames;
+    meta.frames = buffer->rate != 0 ? static_cast<std::uint32_t>(std::llround(
+                                          static_cast<double>(buffer->frames) *
+                                          static_cast<double>(buffer->source_rate) / buffer->rate))
+                                    : buffer->frames;
     buffer->name = meta.name;
 
     // Replace or insert the slot's metadata (single move at the end

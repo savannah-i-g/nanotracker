@@ -33,11 +33,13 @@ enum class CableMode : std::uint8_t { kTap, kReroute };
 // external plugins once their stages land; until then plugin entries
 // from loaded projects stay dormant (graph_wpbr.h).
 enum class NodeKind : std::uint8_t {
-    kTrackerBus,   // per-channel audio/CV outs fed by the sequencer
+    kTrackerBus,   // per-channel audio/CV/MIDI outs fed by the sequencer
     kMasterIn,     // audio sink summing into the master bus
     kModulePlayer, // the libopenmpt player's stereo out
     kUtilitySum,   // pass-through summing node (audio in → audio out)
     kPlugin,       // NTP / external plugin instance
+    kExtMidiIn,    // hardware MIDI input bridged onto a midi out jack
+    kExtMidiOut,   // midi in jack draining to the hardware MIDI output
 };
 
 // Kind-compatibility matrix, ported exactly from
@@ -56,6 +58,11 @@ struct Port {
     // Engine channel index for tracker-bus ports (-1 elsewhere). Lets
     // the runner bind ports to engine buffers without string parsing.
     int channel_ref = -1;
+    // Plugin-node CV param ports only: index into the bound instance's
+    // parameter list (GraphPluginBinding::plugin_set_param_cv). -1
+    // elsewhere. Never serialised — the port id (param key) is the
+    // stable identity; the session regenerates indices with the ports.
+    int param_ref = -1;
 };
 
 // Floating-window placement, persisted with the project (WPBR). Mirrors
@@ -175,9 +182,15 @@ inline constexpr const char* kTrackerBusId = "__tracker-bus";
 inline constexpr const char* kMasterInId = "__master-in";
 inline constexpr const char* kModulePlayerId = "__module-player";
 
-// Tracker Bus: per tracker channel an audio out "chNN" and a volume CV
-// out "chNN.vol.cv" (web port ids kept verbatim so portId-based WPBR
-// snapshots resolve 1:1). MIDI ports join with the MIDI stage.
+// Cap on generated CV param ports per plugin node (the parameter list
+// can be huge on external plugins; the first N stay patchable).
+inline constexpr int kMaxPluginCvParamPorts = 32;
+
+// Tracker Bus: per tracker channel an audio out "chNN", a volume CV
+// out "chNN.vol.cv" and a row-event MIDI out "chNN.midi", plus the
+// merged "master.midi" out and the "master.midi.in" input (web v5
+// layout and port ids kept verbatim — workspaceTrackerBus.ts — so
+// portId- and jackIndex-based WPBR snapshots resolve 1:1).
 [[nodiscard]] Node make_tracker_bus_node(int channel_count);
 
 // Master In: single audio input "main" summing into the master bus.
@@ -190,5 +203,12 @@ inline constexpr const char* kModulePlayerId = "__module-player";
 // Utility sum: audio "in" → audio "out" pass-through. Gives patches a
 // mixing/branching point and makes feedback loops constructible.
 [[nodiscard]] Node make_utility_sum_node(const std::string& workspace_id);
+
+// Ext MIDI In / Out: user-creatable bridges between midi cables and
+// the app's hardware MIDI devices (the MIDI window's open input /
+// output — one device pair app-wide, every node mirrors it). In has a
+// single midi out "midi"; Out a single midi in "midi".
+[[nodiscard]] Node make_ext_midi_in_node(const std::string& workspace_id);
+[[nodiscard]] Node make_ext_midi_out_node(const std::string& workspace_id);
 
 } // namespace nt::graph

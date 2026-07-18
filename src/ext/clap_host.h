@@ -90,6 +90,13 @@ public:
     void process_block(const float* in, float* out, std::uint32_t frames) override;
     void plugin_note_on(int note, float velocity) override;
     void plugin_note_off(int note) override;
+    // CV→param: param_index into params(); value01 maps into the
+    // param's min..max and stages a CLAP_EVENT_PARAM_VALUE for the
+    // next process_block (same staging the UI ring drains into;
+    // bounded, drop-on-full). The main-thread param cache is left
+    // alone — CV modulation is transient, like the web's CV →
+    // AudioParam path which bypassed UI state.
+    void plugin_set_param_cv(int param_index, float value01) override;
 
     // ── Main thread ──────────────────────────────────────────────────
     [[nodiscard]] const std::string& name() const { return name_; }
@@ -97,6 +104,10 @@ public:
     [[nodiscard]] const std::string& plugin_id() const { return plugin_id_; }
 
     [[nodiscard]] bool has_audio_input() const { return has_audio_input_; }
+
+    // True when the plugin exposes a note-in port (the session adds a
+    // midi cable jack to the workspace node when it does).
+    [[nodiscard]] bool has_note_input() const { return has_note_input_; }
 
     [[nodiscard]] const std::vector<ClapParamInfo>& params() const { return params_; }
 
@@ -141,6 +152,7 @@ private:
     bool active_ = false;
     bool processing_ = false;
     bool has_audio_input_ = false;
+    bool has_note_input_ = false;
     // Note-port dialect negotiation: some plugins (u-he among them)
     // only accept MIDI-dialect events on their note-in port.
     bool notes_as_midi_ = false;

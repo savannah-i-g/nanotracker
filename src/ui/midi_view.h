@@ -1,10 +1,14 @@
 // ui/midi_view — MIDI control surface: input/output device pickers,
-// the 24 PPQN clock toggle, live note entry (inbound notes audition
-// the selected instrument slot), MIDI-learn arming and the mapping
-// list. Owns the input drain: called once per frame, it routes note
-// events to the preview path and CCs through the learn/mapping store.
+// the 24 PPQN clock toggle, the inbound-note input mode (off | preview
+// | enter | record, applied by app/midi_record), MIDI-learn arming and
+// the mapping list. Owns the device-ring drain: called once per frame,
+// it forwards note events to the record controller and CCs through the
+// learn/mapping store. Precedence: while learn is armed the device is
+// being wiggled to bind, so note events are dropped — they must not
+// preview or write pattern cells until the arm resolves.
 #pragma once
 
+#include "app/midi_record.h"
 #include "app/project_session.h"
 #include "midi/midi_io.h"
 #include "midi/midi_learn.h"
@@ -16,23 +20,23 @@ namespace nt::ui {
 class MidiView {
 public:
     MidiView(midi::MidiInput& input, midi::MidiOutputPort& output, midi::MidiOutThread& out_thread,
-             midi::MidiLearn& learn);
+             midi::MidiLearn& learn, app::MidiRecord& record);
 
     void draw(app::ProjectSession& session, const Theme& theme);
 
 private:
     void drain_input(app::ProjectSession& session);
+    void draw_input_mode(app::ProjectSession& session, const Theme& theme);
 
-    // App-owned devices/threads the view renders for; rebinding is
-    // meaningless, so references are the honest shape.
+    // App-owned devices/threads/controllers the view renders for;
+    // rebinding is meaningless, so references are the honest shape.
     // NOLINTBEGIN(cppcoreguidelines-avoid-const-or-ref-data-members)
     midi::MidiInput& input_;
     midi::MidiOutputPort& output_;
     midi::MidiOutThread& out_thread_;
     midi::MidiLearn& learn_;
+    app::MidiRecord& record_;
     // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
-    int live_instrument_ = 1;
-    int last_note_ = -1;
     int learn_target_ = 0;
 };
 

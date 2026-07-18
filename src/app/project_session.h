@@ -191,9 +191,14 @@ public:
     bool remove_cable(const std::string& cable_id);
     bool set_cable_mode(const std::string& cable_id, graph::CableMode mode);
 
-    // User-creatable workspace nodes: utility sums and NTP plugin
-    // instances. remove_workspace_node refuses built-ins.
+    // User-creatable workspace nodes: utility sums, Ext MIDI bridges
+    // and NTP plugin instances. remove_workspace_node refuses
+    // built-ins. The Ext MIDI nodes bridge cables to the app's MIDI
+    // devices (the MIDI window's open input/output — one pair
+    // app-wide; every node mirrors it).
     std::string add_sum_node();
+    std::string add_ext_midi_in_node();
+    std::string add_ext_midi_out_node();
     bool remove_workspace_node(const std::string& workspace_id);
 
     // ── NTP plugins ──────────────────────────────────────────────────

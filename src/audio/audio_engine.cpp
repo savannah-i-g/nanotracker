@@ -32,6 +32,7 @@ thread_local bool t_denormals_configured = false;
 AudioEngine::AudioEngine() : device_(make_openal_device()) {
     plugin_note_.fill(-1);
     plugin_slot_.fill(0);
+    midi_note_.fill(-1);
 }
 
 AudioEngine::~AudioEngine() {
@@ -113,6 +114,10 @@ void AudioEngine::drain_commands() {
                 v.active = false;
             }
             voice_sample_ = nullptr;
+            // MIDI carrier state lives as long as the bundle (the web
+            // state's per-bus lifetime); held notes reset with it.
+            midi_fx_state_.fill(EffectMidiState{});
+            midi_note_.fill(-1);
             break;
         case Command::Type::kSwapBundle:
             // Live swap for cable/graph edits: the project pointer and
@@ -309,7 +314,7 @@ void AudioEngine::render_seq_voices_span(std::uint32_t offset, std::uint32_t fra
     }
 }
 
-void AudioEngine::handle_tick_outputs() {
+void AudioEngine::handle_tick_outputs(std::uint32_t frame_offset) {
     const engine::TrackerProject& project = *bundle_->project;
     handle_seq_triggers();
 
@@ -324,6 +329,59 @@ void AudioEngine::handle_tick_outputs() {
         }
         const engine::ChannelPlayState& c = play_state_.channels[static_cast<std::size_t>(ch)];
         ChannelVoice& voice = voices_[static_cast<std::size_t>(ch)];
+
+        // ── Tracker-bus MIDI events ──────────────────────────────────
+        // Row events onto the channel's per-block list, frame-stamped
+        // at this tick. Order within the tick: release noteOff, then
+        // (retrigger noteOff +) noteOn, then the row's effect
+        // translation — the merge sort is stable, so this order
+        // reaches cables. Channel stamp wraps like the web's
+        // `channel & 0x0f`.
+        {
+            MidiEventList& events = channel_midi_[static_cast<std::size_t>(ch)];
+            const auto midi_channel = static_cast<std::uint8_t>(ch & 0x0F);
+            int& held = midi_note_[static_cast<std::size_t>(ch)];
+            auto push_note_off = [&](int note) {
+                events.push({.frame = frame_offset,
+                             .type = MidiMessage::Type::kNoteOff,
+                             .channel = midi_channel,
+                             .data1 = static_cast<std::uint8_t>(note & 0x7F),
+                             .data2 = 0});
+            };
+            if (c.release_note && held >= 0) {
+                push_note_off(held);
+                held = -1;
+            }
+            if (c.trigger_note && c.note > 0) {
+                if (held >= 0) {
+                    push_note_off(held); // pattern lane is monophonic
+                }
+                // Tracker note 1 = C-0 = MIDI 12 (the plugin path's
+                // mapping); velocity from the tick's effective volume.
+                const int midi = c.note + 11;
+                const int vol = c.volume_override >= 0 ? c.volume_override : c.volume;
+                const int velocity = std::clamp(
+                    static_cast<int>(std::lround(static_cast<double>(vol) * 127.0 / 64.0)), 1, 127);
+                events.push({.frame = frame_offset,
+                             .type = MidiMessage::Type::kNoteOn,
+                             .channel = midi_channel,
+                             .data1 = static_cast<std::uint8_t>(midi & 0x7F),
+                             .data2 = static_cast<std::uint8_t>(velocity)});
+                held = midi;
+            }
+            if (play_state_.row_fired) {
+                effect_to_midi(c.row_effect, c.row_effect_param, midi_channel, frame_offset,
+                               midi_fx_state_[static_cast<std::size_t>(ch)], events);
+            }
+            // ECx note cut on its matching tick → noteOff (the IT
+            // Sxx→noteOff counterpart; the engine mutes the voice, the
+            // cable tells hardware to stop the note).
+            if (held >= 0 && c.row_effect == 0xE && ((c.row_effect_param >> 4) & 0xF) == 0xC &&
+                play_state_.tick == (c.row_effect_param & 0xF) && play_state_.tick > 0) {
+                push_note_off(held);
+                held = -1;
+            }
+        }
 
         if (c.release_note) {
             voice.active = false;
@@ -499,7 +557,7 @@ void AudioEngine::advance_transport_in_block(std::uint32_t frames) {
                 play_state_.song_ended = true;
                 transport_playing_ = false;
             } else {
-                handle_tick_outputs();
+                handle_tick_outputs(offset);
                 frames_until_tick_ += static_cast<double>(sample_rate_) * 2.5 / play_state_.bpm;
             }
         }
@@ -529,7 +587,8 @@ void AudioEngine::render(float* interleaved, std::uint32_t frames) {
     std::uint32_t offset = 0;
     while (offset < frames) {
         const std::uint32_t chunk = std::min(kBlockFrames, frames - offset);
-        render_block(interleaved + (static_cast<std::size_t>(offset) * 2), chunk);
+        render_block(interleaved + (static_cast<std::size_t>(offset) * 2), chunk,
+                     stream_frames_ + offset);
         offset += chunk;
     }
 
@@ -567,7 +626,8 @@ void AudioEngine::render(float* interleaved, std::uint32_t frames) {
     snapshot_.publish();
 }
 
-void AudioEngine::render_block(float* interleaved, std::uint32_t frames) {
+void AudioEngine::render_block(float* interleaved, std::uint32_t frames,
+                               std::uint64_t block_start) {
     std::fill_n(interleaved, static_cast<std::size_t>(frames) * 2, 0.0F);
 
     if (tone_on_) {
@@ -610,6 +670,7 @@ void AudioEngine::render_block(float* interleaved, std::uint32_t frames) {
     for (int ch = 0; ch < channel_count; ++ch) {
         std::fill_n(channel_scratch_[static_cast<std::size_t>(ch)].data(),
                     static_cast<std::size_t>(frames) * 2, 0.0F);
+        channel_midi_[static_cast<std::size_t>(ch)].clear();
     }
     std::fill_n(seq_scratch_.data(), static_cast<std::size_t>(frames) * 2, 0.0F);
     if (transport_playing_ && bundle_ != nullptr && bundle_->project != nullptr) {
@@ -632,6 +693,21 @@ void AudioEngine::render_block(float* interleaved, std::uint32_t frames) {
         have_module_block = true;
     }
 
+    // Hardware MIDI arrivals for Ext MIDI In nodes: drain the input
+    // ring once per block (single consumer). Arrival is quantised to
+    // this block's start (frame 0) — the render clock runs ahead of
+    // wall time by the device latency, so reconstructing sub-block
+    // offsets from host timestamps would be fake precision; honest
+    // jitter is ≤ one block (~2.7ms at 48k) plus device latency.
+    ext_midi_in_events_.clear();
+    if (rt::SpscQueue<MidiMessage>* source = ext_midi_source_.load(std::memory_order_acquire)) {
+        MidiMessage message;
+        while (source->pop(message)) {
+            message.frame = 0;
+            ext_midi_in_events_.push(message); // overflow counted, not UB
+        }
+    }
+
     // ── Patch graph ──────────────────────────────────────────────────
     // Evaluates cables: tracker-bus/module sources → utility nodes →
     // Master In, which accumulates into this block's output. Also
@@ -640,9 +716,11 @@ void AudioEngine::render_block(float* interleaved, std::uint32_t frames) {
     bool module_suppressed = false;
     if (bundle_ != nullptr && bundle_->graph != nullptr) {
         std::array<const float*, engine::kMaxChannels> scratch_ptrs{};
+        std::array<const MidiEventList*, engine::kMaxChannels> midi_ptrs{};
         for (int ch = 0; ch < channel_count; ++ch) {
             scratch_ptrs[static_cast<std::size_t>(ch)] =
                 channel_scratch_[static_cast<std::size_t>(ch)].data();
+            midi_ptrs[static_cast<std::size_t>(ch)] = &channel_midi_[static_cast<std::size_t>(ch)];
         }
         const GraphBlockContext ctx{
             .channel_scratch = scratch_ptrs.data(),
@@ -650,6 +728,12 @@ void AudioEngine::render_block(float* interleaved, std::uint32_t frames) {
             .channel_gains = channel_gains_.data(),
             .module_block = have_module_block ? module_scratch_.data() : nullptr,
             .master_accum = interleaved,
+            .channel_midi = midi_ptrs.data(),
+            .ext_midi_in = &ext_midi_in_events_,
+            .ext_midi_out = &ext_midi_out_,
+            .bus_midi_in = &bus_midi_in_,
+            .block_start_frame = block_start,
+            .sample_rate = sample_rate_,
         };
         bundle_->graph->process(ctx, frames);
         suppressed_mask = bundle_->graph->suppressed_channel_mask();

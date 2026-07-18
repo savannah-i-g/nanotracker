@@ -195,6 +195,7 @@ std::unique_ptr<Vst3Plugin> Vst3Module::create(const std::string& class_id, std:
     }
 
     self->pending_notes_.reserve(64);
+    self->pending_cv_params_.reserve(64);
     return self;
 }
 
@@ -233,6 +234,15 @@ void Vst3Plugin::plugin_note_on(int note, float velocity) {
     if (pending_notes_.size() < pending_notes_.capacity()) {
         pending_notes_.push_back({.note = note, .velocity = velocity, .on = true});
     }
+}
+
+void Vst3Plugin::plugin_set_param_cv(int param_index, float value01) {
+    if (param_index < 0 || param_index >= static_cast<int>(params_.size()) ||
+        pending_cv_params_.size() >= pending_cv_params_.capacity()) {
+        return; // full block staging — drop rather than allocate
+    }
+    pending_cv_params_.push_back({.id = params_[static_cast<std::size_t>(param_index)].id,
+                                  .value = static_cast<double>(value01)});
 }
 
 void Vst3Plugin::plugin_note_off(int note) {
@@ -281,6 +291,15 @@ void Vst3Plugin::process_block(const float* in, float* out, std::uint32_t frames
             queue->addPoint(0, change.value, point_index);
         }
     }
+    for (const ParamChange& cv : pending_cv_params_) {
+        int32 queue_index = 0;
+        Vst::IParamValueQueue* queue = impl.input_params.addParameterData(cv.id, queue_index);
+        if (queue != nullptr) {
+            int32 point_index = 0;
+            queue->addPoint(0, cv.value, point_index);
+        }
+    }
+    pending_cv_params_.clear();
 
     // Interleaved → the SDK-managed planar buffers.
     impl.process_data.numSamples = static_cast<int32>(frames);

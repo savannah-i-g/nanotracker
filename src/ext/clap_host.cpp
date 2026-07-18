@@ -281,6 +281,7 @@ std::unique_ptr<ClapPlugin> ClapPlugin::create(const ClapLibrary& library,
     const auto* note_ports = static_cast<const clap_plugin_note_ports_t*>(
         self->plugin_->get_extension(self->plugin_, CLAP_EXT_NOTE_PORTS));
     if (note_ports != nullptr && note_ports->count(self->plugin_, true) > 0) {
+        self->has_note_input_ = true;
         clap_note_port_info_t info{};
         if (note_ports->get(self->plugin_, 0, true, &info)) {
             self->note_port_id_ = info.id;
@@ -367,6 +368,27 @@ void ClapPlugin::set_param(clap_id id, double value) {
         }
     }
     param_changes_.push({.id = id, .value = value});
+}
+
+void ClapPlugin::plugin_set_param_cv(int param_index, float value01) {
+    if (param_index < 0 || param_index >= static_cast<int>(params_.size()) ||
+        pending_params_.size() >= pending_params_.capacity()) {
+        return; // full block staging — drop rather than allocate
+    }
+    const ClapParamInfo& info = params_[static_cast<std::size_t>(param_index)];
+    clap_event_param_value_t event{};
+    event.header.size = sizeof(event);
+    event.header.time = 0;
+    event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    event.header.type = CLAP_EVENT_PARAM_VALUE;
+    event.param_id = info.id;
+    event.cookie = nullptr;
+    event.note_id = -1;
+    event.port_index = -1;
+    event.channel = -1;
+    event.key = -1;
+    event.value = info.min + (static_cast<double>(value01) * (info.max - info.min));
+    pending_params_.push_back(event);
 }
 
 void ClapPlugin::plugin_note_on(int note, float velocity) {

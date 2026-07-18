@@ -41,13 +41,51 @@ void MidiOutThread::run() {
         const double estimated_sample = static_cast<double>(snap.stream_frames) +
                                         ((host_now - snap.host_time_seconds) * snap.sample_rate);
 
-        // Queued events whose target time has arrived.
+        // Collect new work into the pending set: direct queue()
+        // messages (at_sample 0 = immediate) and Ext MIDI Out graph
+        // deliveries from the engine ring (stream-sample timestamps).
+        auto hold = [this](const OutMessage& held) {
+            if (pending_count_ < kMaxPending) {
+                pending_[static_cast<std::size_t>(pending_count_)] = held;
+                ++pending_count_;
+            } // full = dropped; bounded like the rest of the transport
+        };
         OutMessage message{};
         while (queue_.pop(message)) {
-            // The 1ms cadence bounds lateness; early events wait for
-            // the next loop pass by re-queueing would reorder, so v1
-            // sends in arrival order once due.
-            port_.send(message.bytes.data(), message.size);
+            if (message.at_sample == 0) {
+                port_.send(message.bytes.data(), message.size);
+            } else {
+                hold(message);
+            }
+        }
+        audio::ExtMidiOutMessage ext{};
+        while (engine_.poll_ext_midi_out(ext)) {
+            hold({.bytes = ext.bytes, .size = ext.size, .at_sample = ext.at_sample});
+        }
+
+        // Dispatch everything due, in timestamp order (repeated min
+        // scan — pending is small and the cadence is 1ms). Events are
+        // stamped at render time, which runs ahead of the estimate by
+        // the device latency: holding until the estimate catches up is
+        // what phase-aligns cable events with the audible output.
+        for (;;) {
+            int due = -1;
+            for (int i = 0; i < pending_count_; ++i) {
+                const OutMessage& candidate = pending_[static_cast<std::size_t>(i)];
+                if (static_cast<double>(candidate.at_sample) <= estimated_sample &&
+                    (due < 0 ||
+                     candidate.at_sample < pending_[static_cast<std::size_t>(due)].at_sample)) {
+                    due = i;
+                }
+            }
+            if (due < 0) {
+                break;
+            }
+            port_.send(pending_[static_cast<std::size_t>(due)].bytes.data(),
+                       pending_[static_cast<std::size_t>(due)].size);
+            pending_[static_cast<std::size_t>(due)] =
+                pending_[static_cast<std::size_t>(pending_count_ - 1)];
+            --pending_count_;
         }
 
         if (!clock_enabled_.load(std::memory_order_relaxed)) {

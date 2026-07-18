@@ -2,7 +2,8 @@
 // web semantics), model validation, schedule compilation with cycle
 // breaking, WPBR adoption/serialisation round-trips, and deterministic
 // block evaluation through the runner (tap fan-out, reroute
-// suppression, one-block feedback delay, CV fill, gate edge events).
+// suppression, one-block feedback delay, CV fill, gate edge events,
+// midi event transport with merge/fan-out and the Ext MIDI bridges).
 #include "audio/graph_runner.h"
 #include "graph/graph_compile.h"
 #include "graph/graph_model.h"
@@ -280,6 +281,243 @@ TEST_CASE("runner: audio drives gate inputs with frame-accurate edges", "[graph]
     CHECK(events.events[0].on);
     CHECK(events.events[1].frame == 90);
     CHECK_FALSE(events.events[1].on);
+}
+
+namespace {
+
+// Synthetic node with a single midi input — a cable sink the runner
+// gathers into (kUtilitySum's evaluator ignores midi, which is exactly
+// what a pure sink needs).
+nt::graph::Node make_midi_sink(const char* workspace_id) {
+    nt::graph::Node node;
+    node.workspace_id = workspace_id;
+    node.kind = nt::graph::NodeKind::kUtilitySum;
+    nt::graph::Port in;
+    in.id = "in";
+    in.kind = PortKind::kMidi;
+    node.inputs.push_back(in);
+    return node;
+}
+
+nt::audio::MidiMessage note_on(std::uint32_t frame, std::uint8_t channel, std::uint8_t note,
+                               std::uint8_t velocity) {
+    return {.frame = frame,
+            .type = nt::audio::MidiMessage::Type::kNoteOn,
+            .channel = channel,
+            .data1 = note,
+            .data2 = velocity};
+}
+
+} // namespace
+
+TEST_CASE("runner: midi cables fan out and merge sorted by frame", "[graph]") {
+    WorkspaceGraph graph = make_default_graph(2);
+    graph.add_node(make_midi_sink("merge"));
+    graph.add_node(make_midi_sink("copy"));
+    graph.add_node(make_midi_sink("master"));
+    REQUIRE(graph.connect(bus_out("ch01.midi"), {.node_id = "merge", .port_id = "in"},
+                          CableMode::kTap) == ConnectResult::kOk);
+    REQUIRE(graph.connect(bus_out("ch02.midi"), {.node_id = "merge", .port_id = "in"},
+                          CableMode::kTap) == ConnectResult::kOk);
+    REQUIRE(graph.connect(bus_out("ch01.midi"), {.node_id = "copy", .port_id = "in"},
+                          CableMode::kTap) == ConnectResult::kOk);
+    REQUIRE(graph.connect(bus_out("master.midi"), {.node_id = "master", .port_id = "in"},
+                          CableMode::kTap) == ConnectResult::kOk);
+
+    nt::audio::GraphRunner runner(graph, nt::graph::compile_graph(graph));
+
+    nt::audio::MidiEventList ch0;
+    ch0.push(note_on(10, 0, 60, 100));
+    ch0.push(note_on(100, 0, 64, 90));
+    nt::audio::MidiEventList ch1;
+    ch1.push(note_on(40, 1, 67, 80));
+    const std::array<const nt::audio::MidiEventList*, 2> channel_midi = {&ch0, &ch1};
+
+    std::array<float, 256> silent{};
+    const std::array<const float*, 2> scratch = {silent.data(), silent.data()};
+    const std::array<float, 2> gains = {1.0F, 1.0F};
+    std::array<float, 256> master{};
+    const nt::audio::GraphBlockContext ctx{
+        .channel_scratch = scratch.data(),
+        .channel_count = 2,
+        .channel_gains = gains.data(),
+        .module_block = nullptr,
+        .master_accum = master.data(),
+        .channel_midi = channel_midi.data(),
+    };
+    runner.process(ctx, 128);
+
+    // Fan-in: both channel lists merge, sorted by frame.
+    const nt::audio::MidiEventList& merged = runner.debug_midi_input(graph.node_index("merge"), 0);
+    REQUIRE(merged.count == 3);
+    CHECK(merged.events[0].frame == 10);
+    CHECK(merged.events[0].channel == 0);
+    CHECK(merged.events[1].frame == 40);
+    CHECK(merged.events[1].channel == 1);
+    CHECK(merged.events[2].frame == 100);
+    CHECK(merged.dropped == 0);
+
+    // Fan-out: the second destination gets a full copy.
+    const nt::audio::MidiEventList& copied = runner.debug_midi_input(graph.node_index("copy"), 0);
+    REQUIRE(copied.count == 2);
+    CHECK(copied.events[0].data1 == 60);
+    CHECK(copied.events[1].data1 == 64);
+
+    // master.midi carries every channel, merged and channel-stamped.
+    const nt::audio::MidiEventList& all = runner.debug_midi_input(graph.node_index("master"), 0);
+    REQUIRE(all.count == 3);
+    CHECK(all.events[1].channel == 1);
+
+    // The bus's chNN.midi output list is inspectable too.
+    const int bus = graph.node_index(nt::graph::kTrackerBusId);
+    CHECK(runner.debug_midi_output(bus, 2).count == 2); // ch01.midi
+}
+
+TEST_CASE("runner: ext midi nodes bridge rings and stamp stream time", "[graph]") {
+    WorkspaceGraph graph = make_default_graph(1);
+    graph.add_node(nt::graph::make_ext_midi_in_node("emi-1"));
+    graph.add_node(nt::graph::make_ext_midi_out_node("emo-1"));
+    REQUIRE(graph.connect({.node_id = "emi-1", .port_id = "midi"},
+                          {.node_id = "emo-1", .port_id = "midi"},
+                          CableMode::kTap) == ConnectResult::kOk);
+    // Ext In also feeds the sequencer's record hook via master.midi.in.
+    REQUIRE(graph.connect({.node_id = "emi-1", .port_id = "midi"},
+                          {.node_id = nt::graph::kTrackerBusId, .port_id = "master.midi.in"},
+                          CableMode::kTap) == ConnectResult::kOk);
+
+    nt::audio::GraphRunner runner(graph, nt::graph::compile_graph(graph));
+
+    nt::audio::MidiEventList arrivals;
+    arrivals.push(note_on(0, 2, 69, 101));
+    arrivals.push({.frame = 0,
+                   .type = nt::audio::MidiMessage::Type::kControlChange,
+                   .channel = 2,
+                   .data1 = 74,
+                   .data2 = 42});
+    nt::rt::SpscQueue<nt::audio::ExtMidiOutMessage> wire{16};
+    nt::rt::SpscQueue<nt::audio::TimedMidiMessage> record{16};
+
+    std::array<float, 256> silent{};
+    const std::array<const float*, 1> scratch = {silent.data()};
+    const std::array<float, 1> gains = {1.0F};
+    std::array<float, 256> master{};
+    const nt::audio::GraphBlockContext ctx{
+        .channel_scratch = scratch.data(),
+        .channel_count = 1,
+        .channel_gains = gains.data(),
+        .module_block = nullptr,
+        .master_accum = master.data(),
+        .ext_midi_in = &arrivals,
+        .ext_midi_out = &wire,
+        .bus_midi_in = &record,
+        .block_start_frame = 4096,
+    };
+    runner.process(ctx, 128);
+
+    // Ext Out: encoded wire bytes, timestamped block start + frame.
+    nt::audio::ExtMidiOutMessage out{};
+    REQUIRE(wire.pop(out));
+    CHECK(out.size == 3);
+    CHECK(out.bytes[0] == 0x92); // note on, channel 2
+    CHECK(out.bytes[1] == 69);
+    CHECK(out.bytes[2] == 101);
+    CHECK(out.at_sample == 4096);
+    REQUIRE(wire.pop(out));
+    CHECK(out.bytes[0] == 0xB2);
+    CHECK(out.bytes[1] == 74);
+    CHECK(out.bytes[2] == 42);
+    CHECK_FALSE(wire.pop(out));
+
+    // master.midi.in: same events into the record hook with absolute
+    // stream frames.
+    nt::audio::TimedMidiMessage timed{};
+    REQUIRE(record.pop(timed));
+    CHECK(timed.message.type == nt::audio::MidiMessage::Type::kNoteOn);
+    CHECK(timed.at_frame == 4096);
+    REQUIRE(record.pop(timed));
+    CHECK(timed.message.type == nt::audio::MidiMessage::Type::kControlChange);
+    CHECK_FALSE(record.pop(timed));
+}
+
+TEST_CASE("compile schedules midi edges; midi cycles break with a delay", "[graph]") {
+    WorkspaceGraph graph = make_default_graph(1);
+    graph.add_node(nt::graph::make_ext_midi_in_node("emi-1"));
+    graph.add_node(nt::graph::make_ext_midi_out_node("emo-1"));
+    REQUIRE(graph.connect({.node_id = "emi-1", .port_id = "midi"},
+                          {.node_id = "emo-1", .port_id = "midi"},
+                          CableMode::kTap) == ConnectResult::kOk);
+    // Self-loop through the bus: master.midi → master.midi.in.
+    REQUIRE(graph.connect(bus_out("master.midi"),
+                          {.node_id = nt::graph::kTrackerBusId, .port_id = "master.midi.in"},
+                          CableMode::kTap) == ConnectResult::kOk);
+
+    const nt::graph::GraphSchedule schedule = nt::graph::compile_graph(graph);
+    REQUIRE(schedule.edges.size() == 2); // midi edges are scheduled now
+    int delayed = 0;
+    for (const nt::graph::ScheduleEdge& edge : schedule.edges) {
+        CHECK(edge.src_kind == PortKind::kMidi);
+        delayed += edge.delayed ? 1 : 0;
+    }
+    CHECK(delayed == 1); // the bus self-loop
+}
+
+TEST_CASE("WPBR: ext midi nodes and midi cables round-trip", "[graph]") {
+    WorkspaceGraph graph = make_default_graph(2);
+    graph.add_node(nt::graph::make_ext_midi_in_node("emi-1"));
+    graph.add_node(nt::graph::make_ext_midi_out_node("emo-1"));
+    REQUIRE(graph.connect(bus_out("ch01.midi"), {.node_id = "emo-1", .port_id = "midi"},
+                          CableMode::kTap, "c-bus") == ConnectResult::kOk);
+    REQUIRE(graph.connect({.node_id = "emi-1", .port_id = "midi"},
+                          {.node_id = nt::graph::kTrackerBusId, .port_id = "master.midi.in"},
+                          CableMode::kTap, "c-in") == ConnectResult::kOk);
+    graph.find_node("emi-1")->window.x = 321.0F;
+
+    const std::string serialised =
+        nt::graph::workspace_to_wpbr_json(graph, nt::graph::DormantEntries{});
+
+    WorkspaceGraph second = make_default_graph(2);
+    const nt::graph::WpbrAdoptResult adopted = nt::graph::adopt_wpbr_json(second, serialised);
+    CHECK(adopted.warnings.empty());
+    CHECK(adopted.dormant.cables.empty());
+    const nt::graph::Node* emi = second.find_node("emi-1");
+    REQUIRE(emi != nullptr);
+    CHECK(emi->kind == nt::graph::NodeKind::kExtMidiIn);
+    CHECK(emi->window.x == 321.0F);
+    REQUIRE(second.find_node("emo-1") != nullptr);
+    CHECK(second.find_node("emo-1")->kind == nt::graph::NodeKind::kExtMidiOut);
+    const nt::graph::Cable* c_bus = second.find_cable("c-bus");
+    REQUIRE(c_bus != nullptr);
+    CHECK(c_bus->src_kind == PortKind::kMidi);
+    CHECK(c_bus->source.port_id == "ch01.midi");
+    REQUIRE(second.find_cable("c-in") != nullptr);
+    CHECK(second.find_cable("c-in")->dest.port_id == "master.midi.in");
+}
+
+TEST_CASE("WPBR: v5 jackIndex midi endpoints resolve on the live bus", "[graph]") {
+    WorkspaceGraph graph = make_default_graph(4);
+    // v5 typed era: jackIndex 2 = ch01.midi; channels*3 = master.midi;
+    // dest jackIndex on the bus = master.midi.in.
+    const std::string payload = R"({
+      "instruments": [],
+      "cables": [
+        {"id": "c-ch-midi", "mode": "tap",
+         "source": {"workspaceId": "__tracker-bus", "jackIndex": 2},
+         "dest": {"workspaceId": "__tracker-bus", "jackIndex": 0},
+         "srcKind": "midi", "dstKind": "midi"},
+        {"id": "c-master-midi", "mode": "tap",
+         "source": {"workspaceId": "__tracker-bus", "jackIndex": 12},
+         "dest": {"workspaceId": "__tracker-bus", "jackIndex": 0},
+         "srcKind": "midi", "dstKind": "midi"}
+      ]
+    })";
+    const nt::graph::WpbrAdoptResult result = nt::graph::adopt_wpbr_json(graph, payload);
+    CHECK(result.warnings.empty());
+    CHECK(result.dormant.cables.empty());
+    REQUIRE(graph.find_cable("c-ch-midi") != nullptr);
+    CHECK(graph.find_cable("c-ch-midi")->source.port_id == "ch01.midi");
+    CHECK(graph.find_cable("c-ch-midi")->dest.port_id == "master.midi.in");
+    REQUIRE(graph.find_cable("c-master-midi") != nullptr);
+    CHECK(graph.find_cable("c-master-midi")->source.port_id == "master.midi");
 }
 
 TEST_CASE("WPBR adoption: portId, jackIndex eras, dormant carry", "[graph]") {

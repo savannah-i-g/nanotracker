@@ -3,6 +3,53 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 17 closed — MIDI completion
+
+- Landed: **runner midi-edge transport** (`audio/midi_event.h`):
+  frame-stamped bounded MidiEventList port buffers (overflow counted,
+  never UB) carried by kMidi edges — the compiler stops dropping
+  them; fan-out copies, fan-in concatenates in schedule order then
+  stable-sorts by frame; cycle-closing midi edges read the previous
+  block (one-block feedback, replacing the web's hop counter).
+  **Tracker-bus midi wake**: chNN.midi row events, master.midi
+  merge, master.midi.in delivered into an engine SPSC ring
+  (`poll_bus_midi_in`) — dormant WPBR midi cables resolve (v5
+  3-per-channel bus mapping). **Effect→MIDI**
+  (`audio/effect_midi.{h,cpp}`): the web mapper's math byte-exact,
+  plus the MOD-nibble bridge the web never had (its mapper spoke IT
+  letters against MOD-nibble storage and had zero callers — fully
+  dormant; FIXES.md). Txx reaches hardware as PLL clock-rate change.
+  **Ext MIDI In/Out nodes** (NodeKind kExtMidiIn/kExtMidiOut,
+  session-creatable, WPBR/FTRK round-trip tested): In bridges the
+  device ring into block-stamped lists (jitter ≤ one block,
+  documented); Out dispatches through MidiOutThread's PLL with
+  at_sample ordering. **CV→plugin params**: per-instance CV ports
+  from the parameter list (cap 32; port id = NTP dot-path / CLAP/
+  VST3 id), block average → 10ms slew → `plugin_set_param_cv` on all
+  three binding kinds. **Pattern record + step entry**
+  (`app/midi_record.{h,cpp}` + midi_view modes): preview | enter |
+  record; enter shares the exact keyboard entry path (extracted
+  `enter_note_cell`, undoable, advances); record quantises
+  at_frame against the snapshot (nearest row, halves round up, wrap
+  at pattern end), velocity→volume toggle; learn-armed wins over
+  record; both the device ring and the bus ring feed one controller.
+  Eight FIXES.md entries across both halves.
+- Known precision note (recorded): EngineSnapshot lacks the sub-tick
+  frame remainder, so record's anchor can read early by up to one
+  tick near boundaries — publish the remainder if beta reports
+  drift.
+- Verification: 91/91 both trees (15 new: transport frame-stamp
+  exactness, effect→MIDI byte streams, WPBR/FTRK ext-node
+  round-trips, CV→param motion, quantiser math incl. boundary
+  round-up, step-entry parity, offline end-to-end record through a
+  cabled Ext MIDI In, live ALSA loopback Ext-Out bytes AND live
+  record — both asserted for real on this machine, WARN-skip
+  guarded for CI); RT allocation guard clean under the ASan tree;
+  tidy clean; scripted UI run shows the mode section (ENTER
+  selected, armed channel, REC indicator plumbing); CI green both
+  platforms.
+- Backup: `NanoTracker_stage17_2026-07-18.tar.gz`; git tag `stage-17`.
+
 ## 2026-07-18 — Stage 16 closed — Sample lifecycle + waveform editing
 
 - Landed: **generation-fenced reclamation**

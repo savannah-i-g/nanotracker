@@ -8,8 +8,10 @@
 
 #include "audio/audio_device.h"
 #include "audio/dsp.h"
+#include "audio/effect_midi.h"
 #include "audio/fx_chain.h"
 #include "audio/graph_runner.h"
+#include "audio/midi_event.h"
 #include "audio/sample_buffer.h"
 #include "engine/tracker_engine.h"
 #include "modplay/module_player.h"
@@ -170,9 +172,29 @@ public:
     // UI thread: most recent snapshot.
     const EngineSnapshot& snapshot() { return snapshot_.read(); }
 
+    // ── MIDI graph endpoints ─────────────────────────────────────────
+    // Wires the hardware input's graph ring (midi::MidiInput) into the
+    // render path; the engine drains it once per block for Ext MIDI In
+    // nodes. Main thread; the pointer must outlive the engine or be
+    // cleared with null first.
+    void set_ext_midi_source(rt::SpscQueue<MidiMessage>* ring) {
+        ext_midi_source_.store(ring, std::memory_order_release);
+    }
+
+    // Ext MIDI Out deliveries (graph → hardware). Single consumer: the
+    // MIDI out thread, which dispatches by at_sample against its PLL
+    // clock. Without that thread (offline/export) the ring simply
+    // fills and drops — bounded either way.
+    bool poll_ext_midi_out(ExtMidiOutMessage& out) { return ext_midi_out_.pop(out); }
+
+    // master.midi.in deliveries — the pattern-record/step-entry hook.
+    // Single consumer: the UI half drains once per frame and quantises
+    // at_frame against the transport snapshot.
+    bool poll_bus_midi_in(TimedMidiMessage& out) { return bus_midi_in_.pop(out); }
+
 private:
     void render(float* interleaved, std::uint32_t frames);
-    void render_block(float* interleaved, std::uint32_t frames);
+    void render_block(float* interleaved, std::uint32_t frames, std::uint64_t block_start);
     void drain_commands();
 
     std::unique_ptr<AudioDevice> device_;
@@ -192,8 +214,10 @@ private:
     const SampleBuffer* voice_sample_ = nullptr;
     std::uint32_t voice_pos_ = 0;
 
-    // Sequencer (audio-thread only).
-    void handle_tick_outputs();
+    // Sequencer (audio-thread only). `frame_offset` is the tick's
+    // frame position inside the current block — the stamp for the
+    // channel midi events this tick emits.
+    void handle_tick_outputs(std::uint32_t frame_offset);
     void advance_transport_in_block(std::uint32_t frames);
     // Renders active voices into channel scratch at `offset` frames
     // into the block. Dry mix / FX / graph happen once per block in
@@ -219,6 +243,21 @@ private:
     engine::TrackerPlayState play_state_{};
     bool transport_playing_ = false;
     double frames_until_tick_ = 0.0;
+    // ── Tracker-bus MIDI production ──────────────────────────────────
+    // Per-channel row events for the current block (note on/off + the
+    // effect→MIDI translation), frame-stamped at tick offsets; the
+    // graph's tracker bus copies them onto chNN.midi / master.midi.
+    std::array<MidiEventList, engine::kMaxChannels> channel_midi_{};
+    // Effect→MIDI carrier state and the held note per channel (the
+    // pattern lane is monophonic, so retrigger/release pair by
+    // channel). Reset on kSetBundle, like the web state's bus lifetime.
+    std::array<EffectMidiState, engine::kMaxChannels> midi_fx_state_{};
+    std::array<int, engine::kMaxChannels> midi_note_{};
+    // Hardware MIDI bridge rings (see the public poll_* methods).
+    std::atomic<rt::SpscQueue<MidiMessage>*> ext_midi_source_{nullptr};
+    MidiEventList ext_midi_in_events_{};
+    rt::SpscQueue<ExtMidiOutMessage> ext_midi_out_{512};
+    rt::SpscQueue<TimedMidiMessage> bus_midi_in_{256};
     // Exclusive order-list bound from kTransportPlay (0 = none). When
     // set, reaching it (or song wrap) parks the transport instead of
     // looping — the offline export's range end.

@@ -321,12 +321,11 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         for (const NoteKey& nk : kNoteKeys) {
             if (ImGui::IsKeyPressed(nk.key, false) && !io.KeyCtrl) {
                 const int note = std::min(96, nk.offset + (octave_ * 12));
-                engine::TrackerCell cell = current;
-                cell.note = static_cast<std::uint8_t>(note);
-                cell.instrument = static_cast<std::uint8_t>(default_instrument);
-                session.set_cell(pattern_index, cursor_.row, cursor_.channel, cell);
-                const int preview_slot = bound_count > 0 ? bound[0] : selected_slot_;
-                session.preview_note(cursor_.channel, preview_slot, note);
+                // Shared with MIDI step entry (app/midi_record):
+                // bound-resolution, cell write and audition live there
+                // so both entry paths stay identical.
+                app::enter_note_cell(session, pattern_index, cursor_.row, cursor_.channel, note,
+                                     selected_slot_, -1, true);
                 advance_cursor_down(rows);
                 return;
             }
@@ -713,6 +712,9 @@ void PatternView::draw(app::ProjectSession& session, const audio::EngineSnapshot
     // While playing, the edit view follows the playhead pattern (web
     // behaviour: the canvas always renders playState.patternIndex).
     const int pattern_index = snapshot.transport_playing ? snapshot.pattern_index : edit_pattern_;
+    active_pattern_ = pattern_index;
+    active_rows_ =
+        static_cast<int>(project.patterns[static_cast<std::size_t>(pattern_index)].rows.size());
 
     ImGui::SetNextWindowSize(ImVec2(760, 520), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("PATTERN")) {

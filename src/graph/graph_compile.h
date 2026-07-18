@@ -37,8 +37,10 @@ struct GraphSchedule {
     // Node evaluation order (indices into the model's node list).
     std::vector<int> order;
     // All evaluated edges, sorted by dst_node so the runner can gather
-    // a node's inputs from one contiguous range. MIDI cables are not
-    // scheduled (message transport lands with the MIDI stage).
+    // a node's inputs from one contiguous range. MIDI cables schedule
+    // like the rest; a midi edge that closes a cycle is delayed one
+    // block, which bounds feedback patches without the web's hop
+    // counter (audio/midi_event.h).
     std::vector<ScheduleEdge> edges;
     // Bit N set = tracker channel N has a reroute cable from its bus
     // jack; the engine skips its dry sum into the master mix.

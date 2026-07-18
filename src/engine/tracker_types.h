@@ -222,6 +222,10 @@ struct TrackerPlayState {
     int tick = 0;
     int bpm = 125;
     int speed = 6;
+    // True for the tick that genuinely triggered a row (tick 0 outside
+    // pattern-delay repeats) — the effect→MIDI translator fires once
+    // per row on this signal, matching row_effect's refresh.
+    bool row_fired = false;
     std::array<ChannelPlayState, kMaxChannels> channels{};
     bool pattern_ended = false;
     bool song_ended = false;

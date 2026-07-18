@@ -3,6 +3,7 @@
 // Stage 1/2 surface; tracker views replace it as they land.
 #include "app/autosave.h"
 #include "app/input_script.h"
+#include "app/midi_record.h"
 #include "app/project_session.h"
 #include "app/version.h"
 #include "audio/audio_engine.h"
@@ -495,8 +496,16 @@ int main(int argc, char** argv) {
         nt::midi::MidiInput midi_input;
         nt::midi::MidiOutputPort midi_output;
         nt::midi::MidiOutThread midi_out_thread(audio, midi_output);
+        // Ext MIDI In graph nodes drain this ring on the audio thread
+        // (midi_input outlives the engine's render loop — both stop
+        // before scope exit).
+        audio.set_ext_midi_source(&midi_input.graph_ring());
         nt::midi::MidiLearn midi_learn(nt::platform::config_dir() / "midi_mappings.json");
-        nt::ui::MidiView midi_view(midi_input, midi_output, midi_out_thread, midi_learn);
+        // Inbound-note modes (preview/enter/record); the pattern view
+        // is the step-entry cursor surface.
+        nt::app::MidiRecord midi_record(audio, pattern_view);
+        nt::ui::MidiView midi_view(midi_input, midi_output, midi_out_thread, midi_learn,
+                                   midi_record);
 
         if (cli.module_path != nullptr && audio.running()) {
             if (module_view.load_file(audio, module_player, cli.module_path)) {
@@ -704,6 +713,10 @@ int main(int argc, char** argv) {
             workspace_view.draw(session, settings, *theme);
             piano_roll_view.draw(session, *theme);
             midi_view.draw(session, *theme);
+            // Cabled master.midi.in events, drained after the MIDI
+            // window's device drain: per frame, device notes apply
+            // first, then bus notes (each source stays FIFO).
+            midi_record.update(session);
             export_view.draw(session, *theme, shell.show_export);
             session.update_clap_editors();
             session.sweep_retired();

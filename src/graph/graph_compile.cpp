@@ -79,9 +79,6 @@ GraphSchedule compile_graph(const WorkspaceGraph& graph) {
             }
         }
 
-        if (out.kind == PortKind::kMidi) {
-            continue; // message transport lands with the MIDI stage
-        }
         ScheduleEdge edge;
         edge.src_node = src_node;
         edge.src_port = src_port;

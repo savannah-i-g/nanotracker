@@ -48,6 +48,14 @@ public:
 
     void plugin_note_off(int note) override { note_off(note); }
 
+    // CV→param (audio thread): param_index into manifest().params;
+    // value01 maps into the param's min..max. Writes the pre-resolved
+    // node ParamSlot bases directly (no string work, no allocation)
+    // and the host param value, so bare-key "param:" mod routes see
+    // the motion too. Racing UI writes to the same floats are benign —
+    // last writer wins, same as live set_param during playback.
+    void plugin_set_param_cv(int param_index, float value01) override;
+
     [[nodiscard]] const ntp::Manifest& manifest() const { return plugin_->manifest; }
 
     // ── Audio thread ─────────────────────────────────────────────────
@@ -150,7 +158,18 @@ private:
     bool has_voice_envelopes_ = false;
 
     std::vector<std::pair<std::string, float>> host_params_; // key → value
-    std::vector<float> voice_mix_;                           // voiceOut sum
+
+    // Per host param: value range + the ParamSlot bases its dot-path
+    // resolves to (empty for bare keys). Built at construction so
+    // plugin_set_param_cv is pure pointer writes on the audio thread.
+    struct CvParamTarget {
+        float min = 0.0F;
+        float max = 1.0F;
+        std::vector<ParamSlot*> slots;
+    };
+
+    std::vector<CvParamTarget> cv_targets_; // parallel to host_params_
+    std::vector<float> voice_mix_;          // voiceOut sum
     std::vector<float> zero_block_;
     const float* external_in_ = nullptr; // FX input block during process()
 };

@@ -49,6 +49,32 @@ void MidiInput::rtmidi_callback(double delta, std::vector<unsigned char>* messag
         break;
     }
     self->events_.push(event); // full ring drops (bounded input)
+
+    // Graph tap: the cable-transport families only (running-status-
+    // free RtMidi messages; clock/sysex never reach here — ignoreTypes
+    // filters them at open).
+    audio::MidiMessage graph_message;
+    graph_message.channel = status & 0x0F;
+    graph_message.data1 = event.data1 & 0x7F;
+    graph_message.data2 = event.data2 & 0x7F;
+    switch (status & 0xF0) {
+    case 0x90:
+        graph_message.type = event.data2 > 0 ? audio::MidiMessage::Type::kNoteOn
+                                             : audio::MidiMessage::Type::kNoteOff;
+        break;
+    case 0x80:
+        graph_message.type = audio::MidiMessage::Type::kNoteOff;
+        break;
+    case 0xB0:
+        graph_message.type = audio::MidiMessage::Type::kControlChange;
+        break;
+    case 0xE0:
+        graph_message.type = audio::MidiMessage::Type::kPitchBend;
+        break;
+    default:
+        return; // not a cable-transport message
+    }
+    self->graph_events_.push(graph_message); // full ring drops
 }
 
 std::vector<std::string> MidiInput::port_names() const {

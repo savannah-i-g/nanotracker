@@ -224,6 +224,10 @@ Node make_tracker_bus_node(int channel_count) {
     node.kind = NodeKind::kTrackerBus;
     node.window.x = 40.0F;
     node.window.y = 380.0F;
+    // Web v5 layout: [audio, vol cv, midi] per channel, then the merged
+    // master.midi out; master.midi.in is the bus's only input. Order
+    // matters — jackIndex-era WPBR snapshots resolve positionally
+    // (graph_wpbr.cpp).
     for (int ch = 0; ch < channel_count; ++ch) {
         std::array<char, 8> padded{};
         std::snprintf(padded.data(), padded.size(), "%02d", ch + 1);
@@ -239,7 +243,23 @@ Node make_tracker_bus_node(int channel_count) {
         cv.kind = PortKind::kCv;
         cv.channel_ref = ch;
         node.outputs.push_back(std::move(cv));
+        Port midi;
+        midi.id = std::string("ch") + padded.data() + ".midi";
+        midi.label = std::string("M") + padded.data();
+        midi.kind = PortKind::kMidi;
+        midi.channel_ref = ch;
+        node.outputs.push_back(std::move(midi));
     }
+    Port master_midi;
+    master_midi.id = "master.midi";
+    master_midi.label = "MIDI OUT";
+    master_midi.kind = PortKind::kMidi;
+    node.outputs.push_back(std::move(master_midi));
+    Port master_midi_in;
+    master_midi_in.id = "master.midi.in";
+    master_midi_in.label = "MIDI IN";
+    master_midi_in.kind = PortKind::kMidi;
+    node.inputs.push_back(std::move(master_midi_in));
     return node;
 }
 
@@ -293,6 +313,38 @@ Node make_utility_sum_node(const std::string& workspace_id) {
     out.label = "OUT";
     out.kind = PortKind::kAudio;
     node.outputs.push_back(std::move(out));
+    return node;
+}
+
+Node make_ext_midi_in_node(const std::string& workspace_id) {
+    Node node;
+    node.workspace_id = workspace_id;
+    node.plugin_id = "builtin:ext-midi-in";
+    node.display_name = "EXT MIDI IN";
+    node.kind = NodeKind::kExtMidiIn;
+    node.window.x = 40.0F;
+    node.window.y = 200.0F;
+    Port out;
+    out.id = "midi";
+    out.label = "MIDI";
+    out.kind = PortKind::kMidi;
+    node.outputs.push_back(std::move(out));
+    return node;
+}
+
+Node make_ext_midi_out_node(const std::string& workspace_id) {
+    Node node;
+    node.workspace_id = workspace_id;
+    node.plugin_id = "builtin:ext-midi-out";
+    node.display_name = "EXT MIDI OUT";
+    node.kind = NodeKind::kExtMidiOut;
+    node.window.x = 620.0F;
+    node.window.y = 200.0F;
+    Port in;
+    in.id = "midi";
+    in.label = "MIDI";
+    in.kind = PortKind::kMidi;
+    node.inputs.push_back(std::move(in));
     return node;
 }
 

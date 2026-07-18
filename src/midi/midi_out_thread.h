@@ -8,8 +8,11 @@
 // (11-midi.md).
 //
 // Outputs: 24 PPQN MIDI clock derived from the transport (start /
-// stop / song position on transport edges), plus queued note/CC events
-// from the Ext MIDI Out graph endpoint.
+// stop / song position on transport edges), plus timestamped events
+// from the Ext MIDI Out graph endpoint (drained from the engine's
+// ring, held until the PLL estimate reaches their at_sample, then
+// sent in timestamp order) and direct queue() messages (at_sample 0 =
+// send on the next pass).
 #pragma once
 
 #include "audio/audio_engine.h"
@@ -61,6 +64,12 @@ private:
     std::atomic<bool> clock_enabled_{false};
     std::atomic<std::uint64_t> ticks_sent_{0};
     rt::SpscQueue<OutMessage> queue_{512};
+    // Timestamped events awaiting their at_sample (graph deliveries
+    // land here; overflow drops the newest — bounded, like every list
+    // in the midi transport).
+    static constexpr int kMaxPending = 256;
+    std::array<OutMessage, kMaxPending> pending_{};
+    int pending_count_ = 0;
     std::thread thread_;
 };
 

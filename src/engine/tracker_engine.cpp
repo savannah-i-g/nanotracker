@@ -226,6 +226,7 @@ void advance_tick(TrackerPlayState& state, const TrackerProject& project) {
     state.seq_trigger_count = 0;
     bool has_loop_jump = false; // produced and consumed within this call
     state.pattern_loop_flush = false;
+    state.row_fired = false;
 
     const TrackerPattern* pattern = pattern_by_id(project, state.pattern_index);
     if (pattern == nullptr) {
@@ -237,6 +238,7 @@ void advance_tick(TrackerPlayState& state, const TrackerProject& project) {
 
     if (tick == 0 && state.pattern_delay == 0) {
         // Row trigger: notes + row-trigger effects.
+        state.row_fired = true;
         for (int ch = 0; ch < channel_count; ++ch) {
             const TrackerCell* cell = cell_at(*pattern, row, ch);
             if (cell == nullptr) {

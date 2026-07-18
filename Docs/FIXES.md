@@ -188,3 +188,45 @@ detail as each fix lands.
   a selection): a partial DC correction introduces a step at the
   selection edge — a click. Recorded divergence, not an omission;
   range support returns if a real use case appears.
+- **Effect→MIDI was dormant and namespace-mismatched in the web**
+  (`trackerEffectToMidi.ts` mapEffectToMidi and
+  `getTrackerBusControls` had zero callers, and the mapper speaks IT
+  effect letters while both pattern models store MOD nibbles — it
+  could never have fired): natively wired for real
+  (`audio/effect_midi.{h,cpp}`) with a documented MOD-nibble bridge
+  (0x1→Fxx, 0x2→Exx, 0x3→Gxx, 0x5/0x6/0xA→Dxx halves, 0x8→Xxx,
+  0xC→Mxx, EAx/EBx fine slides, ECx→noteOff-at-tick), byte-exact to
+  the web mapper's math.
+- **master.midi.in reaches something** (the web dispatched inbound
+  bus MIDI to an `onInboundMidi` handler nothing ever installed):
+  natively delivered into an engine SPSC ring
+  (`AudioEngine::poll_bus_midi_in`) — the pattern-record surface.
+- **MIDI feedback via one-block delay, not hop counting** (web
+  MidiBus capped propagation at maxHops 32/256): cycle-closing midi
+  edges read the previous block, same rule as audio/CV feedback;
+  per-block lists are bounded with counted overflow.
+- **Txx→BPM emits no wire event** (the web's "bpm" midi event kind
+  had no byte form and no consumer): tempo reaches hardware as the
+  clock-rate change through the PLL 24 PPQN clock thread.
+- **No implicit midi-thru/midi-out adapter ports** (web adapters
+  created them implicitly): cables addressed to them stay dormant
+  with lossless round-trip, matching the strict-port model.
+- **MIDI step entry follows the pattern cursor** (`Tracker.tsx:1927`
+  kept a separate `midiEnterRow` counter with its own RESET button,
+  ignoring the editor cursor): inbound notes in enter mode write at
+  the pattern cursor through the exact keyboard-entry path and advance
+  it the same way (`app/midi_record.cpp` `enter_note_cell`, shared
+  with `ui/pattern_view.cpp`) — locked in `Plan_PostV1/06`.
+- **Velocity→volume OFF leaves the volume column alone**
+  (`Tracker.tsx:1915` wrote `0xFF` in enter/record when the toggle was
+  off, clearing any volume already in the cell): keyboard entry never
+  touches the volume column, and step entry is keyboard-parity, so
+  the off state keeps the cell's value; ON maps round(velocity/127·64)
+  exactly as the web did.
+- **Live record quantises from event timestamps**
+  (`Tracker.tsx:1934` wrote at whatever `ps.row` the UI thread
+  happened to observe): cabled `master.midi.in` events carry absolute
+  stream-frame stamps and quantise to the nearest row against the
+  transport snapshot — second half of a row rounds UP to the next row
+  (`app/midi_record.cpp` `quantise_record_row`); untimed device notes
+  are stamped at the latest snapshot and take the same path.

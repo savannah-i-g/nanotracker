@@ -17,10 +17,12 @@
 // Anything that still fails to resolve is dropped with a warning the
 // UI surfaces (fix #13 — the web dropped silently to the console).
 //
-// Instruments and cables that reference plugin features of later
-// stages (NTP plugins, MIDI transport) are not discarded: they are
-// carried verbatim as dormant entries so projects round-trip losslessly
-// and those stages can wake them.
+// Instruments and cables that reference features the native node set
+// cannot host (uncatalogued plugins, the web's implicit midi-thru/
+// midi-out adapter ports) are not discarded: they are carried verbatim
+// as dormant entries so projects round-trip losslessly and later loads
+// can wake them. Native-authored builtin nodes (sum, ext-midi-in/out)
+// recreate directly from their pluginId.
 #pragma once
 
 #include "graph/graph_model.h"
