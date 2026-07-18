@@ -3,6 +3,44 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 13 closed — Repo, CI, Windows beta (post-v1 opens)
+
+- Landed: **public repository** — `git init` in Output/, publish scrub
+  (README with both platforms' build steps, `.gitignore`, 17 new
+  third-party licence texts in `LICENSES/` for a complete roster of
+  19), pushed public to github.com/savannah-i-g/nanotracker (GPLv3;
+  `include/ntp/` MIT). **CI** (`.github/workflows/ci.yml`): Linux
+  (GCC) + Windows (MSVC/Ninja) jobs, ccache/sccache + `_deps` source
+  caching, pinned Python for the glad generator; the Windows job
+  uploads the beta artifact (exe + OpenAL Soft + libopenmpt DLL set +
+  assets + licences). **Windows seam**, exactly the audited surface:
+  `platform/shared_library.{h,cpp}` (dlopen/LoadLibrary behind one
+  seam; clap_host and the lame loader route through it),
+  `ext/editor_host_surface.{h,+x11.cpp,+win32.cpp}` (the plugin-editor
+  host window abstraction — X11 impl carries the old code, Win32 impl
+  is CreateWindowEx + message pump; Stage 20's VST3 editors inherit
+  it), `platform/paths.cpp` (`GetModuleFileNameW`, `%APPDATA%`),
+  CLAP Win32 search paths + `;` separator, posix-fd pump compiled out
+  on Windows, CMake platform gating (X11, VST3 `_win32` TUs, MSVC
+  flags, OpenAL Soft 1.25.2 FetchContent on WIN32, libopenmpt 0.8.3
+  upstream VS2022 dev package pinned by SHA256). Fold-ins: S3M/IT
+  importer binary fixtures + oracle tests (fixtures with teeth —
+  mutation-checked; unsupported-effect warnings asserted
+  counted-not-silent), the three stale promise comments rewritten as
+  invariants, WinMM virtual-port refusal made explicit in midi_io
+  (RtMidi only warns), dead theme helpers removed, snprintf buffers
+  widened to silence GCC format-truncation analysis.
+- Verification: both local trees green (41/41 release, 41/41
+  ASan/UBSan); clang-tidy clean on every touched file; **CI green on
+  both runners** — Linux 41/41, Windows 40 pass + 1 WARN-skip (MIDI
+  loopback, honestly refused on WinMM); beta artifact downloaded and
+  inspected (complete DLL/licence set); artifact boots under Wine,
+  90 frames, exit 0 — recorded as smoke **proxy**, not validation
+  (locked decision 4: GA promotion waits on community reports).
+- Non-goal recorded: OpenAL buffer-queue fallback stays unbuilt
+  (shipping OpenAL Soft dissolves it; revisit only on beta reports).
+- Backup: `NanoTracker_stage13_2026-07-18.tar.gz`; git tag `stage-13`.
+
 ## 2026-07-17 — Stage 12 closed — Export + resilience; v1 feature-complete
 
 - Landed: `io/ftrk_writer` — FTRK **version 14**: the full v13 layout

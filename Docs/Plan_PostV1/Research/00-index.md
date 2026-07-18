@@ -51,8 +51,8 @@ findings, plan implications, and sources. This index separates what
   `../04-export-suite.md`.
 - **OpenAL Soft must be built/shipped ourselves on Windows** — no
   first-party prebuilts; vcpkg port exists (1.25.1) but has a recent
-  MSVC-2026 build-failure report; FetchContent (already our Linux
-  path) stays the single acquisition route on both OSes.
+  MSVC-2026 build-failure report; FetchContent is the Windows
+  acquisition route (Linux keeps the system package).
 - **Windows beta artifact = portable zip** — winget accepts zip
   manifests since 1.4, so the beta zip can graduate to a winget
   manifest at GA without changing the artifact shape.

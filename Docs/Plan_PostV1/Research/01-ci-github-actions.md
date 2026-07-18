@@ -11,7 +11,7 @@ Grounds Stage 13 (`../02-release-engineering.md`).
 | Repo cache budget | 2 GiB per repository (GitHub Actions cache) |
 | FetchContent caching | cache the build tree's `_deps` source dirs with `actions/cache`; CPM.cmake's `CPM_SOURCE_CACHE` is the same idea if we ever want it — plain FetchContent + cache action suffices |
 | GPU on runners | none, either OS — software GL required for UI tests |
-| OpenAL Soft on runners | build from source via FetchContent (same as Linux); no first-party prebuilts; vcpkg port (1.25.1) has a 2026 MSVC build-failure report — avoid the extra moving part |
+| OpenAL Soft on runners | Linux: distro package (as locally). Windows: build from source via FetchContent — no first-party prebuilts; vcpkg port (1.25.1) has a 2026 MSVC build-failure report — avoid the extra moving part |
 
 ## Headless GL
 

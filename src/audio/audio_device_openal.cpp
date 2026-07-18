@@ -16,6 +16,7 @@ namespace {
 class OpenAlDevice final : public AudioDevice {
 public:
     OpenAlDevice() = default;
+
     ~OpenAlDevice() override { stop(); }
 
     OpenAlDevice(const OpenAlDevice&) = delete;
@@ -33,8 +34,7 @@ public:
             return fail("no OpenAL output device");
         }
 
-        const std::array<ALCint, 3> attrs = {ALC_FREQUENCY, static_cast<ALCint>(requested_rate),
-                                             0};
+        const std::array<ALCint, 3> attrs = {ALC_FREQUENCY, static_cast<ALCint>(requested_rate), 0};
         context_ = alcCreateContext(device_, attrs.data());
         if (context_ == nullptr || alcMakeContextCurrent(context_) == ALC_FALSE) {
             teardown();
@@ -51,8 +51,8 @@ public:
         }
         // Extension entry points arrive as untyped function pointers;
         // the cast is the API contract.
-        buffer_callback_ = reinterpret_cast<LPALBUFFERCALLBACKSOFT>( // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-            alGetProcAddress("alBufferCallbackSOFT"));
+        buffer_callback_ = // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+            reinterpret_cast<LPALBUFFERCALLBACKSOFT>(alGetProcAddress("alBufferCallbackSOFT"));
         if (buffer_callback_ == nullptr) {
             teardown();
             return fail("alBufferCallbackSOFT missing");
@@ -126,7 +126,7 @@ private:
     // implicitly under older headers.
     static ALsizei AL_APIENTRY pull(void* user, void* sampledata, ALsizei numbytes) noexcept {
         auto* self = static_cast<OpenAlDevice*>(user);
-        const rt::RtScope rt_scope;
+        [[maybe_unused]] const rt::RtScope rt_scope;
 
         constexpr ALsizei kFrameBytes = 2 * sizeof(float);
         const auto frames = static_cast<std::uint32_t>(numbytes / kFrameBytes);
