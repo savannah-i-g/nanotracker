@@ -308,9 +308,12 @@ TEST_CASE("unresolved POVR entries survive a session load-save cycle", "[session
     REQUIRE(session.save_ftrk(out_path));
 
     std::string error;
-    std::ifstream file(out_path, std::ios::binary);
-    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)),
-                                          std::istreambuf_iterator<char>());
+    std::vector<std::uint8_t> bytes;
+    {
+        // Scoped: Windows refuses to remove a file with an open handle.
+        std::ifstream file(out_path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
     auto result = nt::io::read_ftrk(bytes.data(), bytes.size(), error);
     REQUIRE(result.has_value());
     REQUIRE(result->extras.povr_overrides.size() == 1);
