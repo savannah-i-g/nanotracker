@@ -8,11 +8,13 @@
 #include "io/import/mod_importer.h"
 #include "io/import/s3m_importer.h"
 #include "io/import/xm_importer.h"
+#include "io/sha256.h"
 #include "platform/paths.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -36,6 +38,8 @@ void ProjectSession::new_project() {
     stop();
     project_ = engine::create_project(4);
     undo_.clear();
+    povr_raw_.clear(); // carried POVR belongs to the previous project
+    povr_pending_.clear();
     for (auto& buffer : buffers_) {
         reclaimer_.stage(std::move(buffer)); // freed once the publish below lands
     }
@@ -79,6 +83,8 @@ bool ProjectSession::load_file(const std::filesystem::path& path) {
     }
     project_ = std::move(*imported);
     undo_.clear();
+    povr_raw_.clear(); // imports carry no POVR; drop the previous project's
+    povr_pending_.clear();
     decode_samples();
     rebuild_workspace_nodes();
     publish_bundle();
@@ -143,7 +149,41 @@ bool ProjectSession::load_ftrk(const std::filesystem::path& path) {
     // Project-scope plugin presets (PPRS) attach to instances by
     // workspace id; unresolved entries stay stored for round-trip.
     preset_bank_.adopt_pprs(result->extras.pprs_json, load_warnings_);
+    // POVR sample overrides adopt into the live instance tables
+    // (decoded through the standard sample path at device rate).
+    // Entries whose instance never woke — missing plugin, foreign id —
+    // and any uninterpretable raw block are kept for round-trip.
     povr_raw_ = std::move(result->extras.povr_raw);
+    povr_pending_.clear();
+    for (io::FtrkPovrOverride& entry : result->extras.povr_overrides) {
+        plugins::NtpInstance* instance = plugin_instance(entry.instance_id);
+        if (instance == nullptr) {
+            povr_pending_.push_back(std::move(entry));
+            continue;
+        }
+        std::string format;
+        std::string decode_error;
+        std::shared_ptr<audio::SampleBuffer> buffer = audio::load_sample_memory(
+            entry.bytes.data(), entry.bytes.size(),
+            audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000, format, decode_error);
+        if (buffer == nullptr) {
+            load_warnings_.push_back("sample override " + entry.instance_id + "/" + entry.slot_id +
+                                     ": " + decode_error);
+            povr_pending_.push_back(std::move(entry)); // undecodable ≠ droppable
+            continue;
+        }
+        buffer->name = entry.name;
+        plugins::SlotOverride slot;
+        slot.hash = std::move(entry.hash);
+        slot.name = std::move(entry.name);
+        slot.sample_rate = entry.sample_rate;
+        slot.channels = entry.channels;
+        slot.duration = entry.duration;
+        slot.bytes = std::move(entry.bytes);
+        slot.buffer = std::move(buffer);
+        // Fresh instance — nothing replaced, nothing to retire.
+        instance->set_slot_override(entry.slot_id, std::move(slot));
+    }
     // External plugin state (XPLG, v14): reopen libraries and restore.
     for (const io::FtrkExternalPlugin& external : result->extras.external) {
         bool restored = false;
@@ -182,6 +222,25 @@ io::FtrkWriteExtras ProjectSession::assemble_write_extras() {
     io::FtrkWriteExtras extras;
     extras.workspace_json = graph::workspace_to_wpbr_json(workspace_, workspace_dormant_);
     extras.pprs_json = preset_bank_.to_pprs_json();
+    // POVR from the live per-instance override tables (content-hash
+    // keyed; the writer dedups bytes), then the entries that never
+    // resolved at load, then — only if nothing structured exists — an
+    // uninterpretable raw block verbatim.
+    for (const auto& [workspace_id, instance] : instances_by_node_) {
+        for (const auto& [slot_id, slot] : instance->slot_overrides()) {
+            io::FtrkPovrOverride entry;
+            entry.instance_id = workspace_id;
+            entry.slot_id = slot_id;
+            entry.hash = slot.hash;
+            entry.name = slot.name;
+            entry.sample_rate = slot.sample_rate;
+            entry.channels = slot.channels;
+            entry.duration = slot.duration;
+            entry.bytes = slot.bytes;
+            extras.povr.push_back(std::move(entry));
+        }
+    }
+    extras.povr.insert(extras.povr.end(), povr_pending_.begin(), povr_pending_.end());
     extras.povr_raw = povr_raw_;
     // Bundle every NTP archive referenced by a workspace node (dedup).
     std::vector<std::string> bundled_ids;
@@ -491,6 +550,101 @@ void ProjectSession::preview_plugin_release() {
                      .aux_int = (preview_plugin_slot_ << 8) | preview_plugin_note_});
         preview_plugin_note_ = -1;
     }
+}
+
+bool ProjectSession::set_plugin_sample_override(const std::string& workspace_id,
+                                                const std::string& slot_id,
+                                                const std::filesystem::path& path) {
+    plugins::NtpInstance* instance = plugin_instance(workspace_id);
+    if (instance == nullptr) {
+        error_ = "no plugin instance for \"" + workspace_id + "\"";
+        return false;
+    }
+    // The slot must exist; the strictest authored duration cap wins
+    // when several zones share the slot.
+    bool slot_exists = false;
+    double max_duration = 0.0;
+    for (const ntp::DspNode& node : instance->manifest().graph.nodes) {
+        for (const ntp::SampleZone& zone : node.zones) {
+            if (!zone.user_assignable || zone.slot_id != slot_id) {
+                continue;
+            }
+            slot_exists = true;
+            if (zone.max_duration_sec > 0.0 &&
+                (max_duration == 0.0 || zone.max_duration_sec < max_duration)) {
+                max_duration = zone.max_duration_sec;
+            }
+        }
+    }
+    if (!slot_exists) {
+        error_ = "plugin has no user-assignable slot \"" + slot_id + "\"";
+        return false;
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error_ = "cannot open " + path.string();
+        return false;
+    }
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+    std::string format;
+    std::string decode_error;
+    std::shared_ptr<audio::SampleBuffer> buffer = audio::load_sample_memory(
+        bytes.data(), bytes.size(), audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000,
+        format, decode_error);
+    if (buffer == nullptr) {
+        error_ = decode_error;
+        return false;
+    }
+    const double duration =
+        buffer->rate != 0 ? static_cast<double>(buffer->frames) / buffer->rate : 0.0;
+    if (max_duration > 0.0 && duration > max_duration) {
+        std::array<char, 96> text{};
+        std::snprintf(text.data(), text.size(), "sample is %.2fs; slot \"%s\" caps at %.2fs",
+                      duration, slot_id.c_str(), max_duration);
+        error_ = text.data();
+        return false;
+    }
+
+    plugins::SlotOverride slot;
+    slot.hash = io::sha256_hex_prefixed(bytes.data(), bytes.size());
+    slot.name = path.filename().string();
+    slot.sample_rate = buffer->source_rate;
+    slot.channels =
+        static_cast<std::uint8_t>(std::min<std::uint32_t>(buffer->source_channels, 255));
+    slot.duration = static_cast<float>(duration);
+    slot.bytes = std::move(bytes);
+    buffer->name = slot.name;
+    slot.buffer = std::move(buffer);
+
+    // Structural: the sampler resolves the new buffer at the next
+    // trigger; the replaced one stays alive until the republish below
+    // proves the audio thread let go (kSetBundle resets plugin voices
+    // in the drain that applies it — sample_reclaim.h).
+    stop();
+    reclaimer_.stage(instance->set_slot_override(slot_id, std::move(slot)));
+    undo_.clear(); // matches the tracker slot-load contract
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::clear_plugin_sample_override(const std::string& workspace_id,
+                                                  const std::string& slot_id) {
+    plugins::NtpInstance* instance = plugin_instance(workspace_id);
+    if (instance == nullptr) {
+        error_ = "no plugin instance for \"" + workspace_id + "\"";
+        return false;
+    }
+    std::shared_ptr<audio::SampleBuffer> replaced = instance->clear_slot_override(slot_id);
+    if (replaced == nullptr) {
+        return true; // already at fallback — nothing to retire
+    }
+    stop();
+    reclaimer_.stage(std::move(replaced));
+    undo_.clear();
+    publish_bundle();
+    return true;
 }
 
 engine::SequenceLayer* ProjectSession::seq_layer(int pattern_index, int channel, int layer,

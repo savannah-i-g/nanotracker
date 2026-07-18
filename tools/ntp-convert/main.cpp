@@ -20,6 +20,7 @@ namespace {
 
 using nlohmann::json;
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables) — CLI-lifetime report sink
 std::vector<std::string> g_report;
 
 void report(const std::string& message) {
@@ -184,6 +185,8 @@ json legacy_instrument_graph(const json& dsp) {
     };
 }
 
+// Control trees are recursive by design (the loader bounds depth to 4).
+// NOLINTNEXTLINE(misc-no-recursion)
 json convert_ui(const json& ui) {
     json controls = json::array();
     for (const json& control : ui.value("controls", json::array())) {
@@ -207,9 +210,7 @@ json convert_ui(const json& ui) {
     return json::array({std::move(controls)});
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     const char* input_path = nullptr;
     const char* output_path = nullptr;
     for (int i = 1; i < argc; ++i) {
@@ -257,8 +258,15 @@ int main(int argc, char** argv) {
     }
     if (web.contains("requires") && !web["requires"].empty()) {
         out["requires"] = web["requires"];
-        report("requires[] carried, but NTP v1 hosts refuse unknown capabilities — expect "
-               "a load refusal until the features land natively");
+        // "userSamples" (user-assignable slots + POVR) is native; only
+        // capabilities beyond it will be refused at load.
+        for (const json& capability : web["requires"]) {
+            if (capability.is_string() && capability.get<std::string>() != "userSamples") {
+                report("requires[] carries \"" + capability.get<std::string>() +
+                       "\" — NTP v1 hosts refuse unknown capabilities, expect a load refusal "
+                       "until the feature lands natively");
+            }
+        }
     }
 
     const json dsp = web.value("dsp", json::object());
@@ -339,4 +347,17 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr, "%zu conversion note(s)\n", g_report.size());
     return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // json access and serialisation can throw (e.g. invalid UTF-8 in
+    // the source manifest); a converter should report, not abort.
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "conversion failed: %s\n", e.what());
+        return 1;
+    }
 }

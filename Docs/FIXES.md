@@ -244,3 +244,23 @@ detail as each fix lands.
   overflow); mid-batch I/O failures report the failing index +
   appliedBeforeFailure (a case the web surface never expressed).
   Full delta in the stage ledger.
+- **User-assignable zones require slotId + fallbackFile** (the web
+  only "strongly recommended" the fallback and could play silence on
+  a fresh install): strict load with collected errors
+  (`plugins/ntp_loader.cpp`).
+- **sliceMap autoDetect honesty**: `"transients"` normalises to
+  `grid:16` at load (web v4.1.0's silent runtime fallback, recorded
+  once in the manifest instead); `"markers"` (WAV cue chunks) is
+  refused with a collected error — parked with the transient
+  detector.
+- **New (native-only): POVR raw carry no longer swallows trailing
+  blocks** — the verbatim passthrough read to EOF, duplicating
+  PPRS/XPLG inside the raw copy on re-save; the carry is bounded by
+  the next block offset.
+- **New (native-only): stale POVR cleared on project switch** —
+  new_project()/module imports previously kept the prior project's
+  carried POVR, re-emitting foreign overrides on save.
+- **New (native-only): zone round-robin advance was allocating on the
+  audio thread** (a per-trigger std::vector<bool>, caught by the
+  debug allocator once RR groups went live): preallocated scratch,
+  shared with the slice RR path.

@@ -28,6 +28,23 @@ inline float downmix(const float* stereo, std::uint32_t frame) {
            0.5F;
 }
 
+// Interns a group name into `names`, returning its stable index (-1
+// for "no group"). Zones and slices share this machinery; choke groups
+// additionally share one namespace per node, so a slice can cut a
+// zone's voice and vice versa when authors reuse a name.
+int intern_group(std::vector<std::string>& names, const std::string& name) {
+    if (name.empty()) {
+        return -1;
+    }
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == name) {
+            return static_cast<int>(i);
+        }
+    }
+    names.push_back(name);
+    return static_cast<int>(names.size() - 1);
+}
+
 audio::dsp::Biquad::Type biquad_type_from(const std::string& name) {
     if (name == "highpass") {
         return audio::dsp::Biquad::Type::kHighpass;
@@ -162,24 +179,60 @@ NodeRuntime::NodeRuntime(const ntp::DspNode& def, const LoadedNtpPlugin& plugin,
         std::vector<std::string> rr_names;
         std::vector<std::string> choke_names;
         for (const ntp::SampleZone& zone : def.zones) {
-            const auto it = plugin.samples.find(zone.file);
+            // Baked default: user-assignable zones play their fallback
+            // until an override lands; plain zones play `file`.
+            const std::string& baked = zone.user_assignable && !zone.fallback_file.empty()
+                                           ? zone.fallback_file
+                                           : zone.file;
+            const auto it = plugin.samples.find(baked);
             zone_buffers_.push_back(it != plugin.samples.end() ? it->second.get() : nullptr);
-            auto intern = [](std::vector<std::string>& names, const std::string& name) {
-                if (name.empty()) {
-                    return -1;
-                }
-                for (std::size_t i = 0; i < names.size(); ++i) {
-                    if (names[i] == name) {
-                        return static_cast<int>(i);
+            rr_group_of_zone_.push_back(intern_group(rr_names, zone.round_robin_group));
+            choke_group_of_zone_.push_back(intern_group(choke_names, zone.choke_group));
+        }
+        zone_override_ = std::vector<std::atomic<const audio::SampleBuffer*>>(def.zones.size());
+        rr_counters_.assign(rr_names.size(), 0);
+        rr_advanced_.assign(rr_names.size(), 0);
+
+        if (def.slice_map.has_value()) {
+            const ntp::SliceMap& map = *def.slice_map;
+            // Baked slice source: an archive path directly, or the
+            // fallback of the referenced user-assignable slot (which
+            // may live on another sampler node — slot ids are
+            // plugin-wide).
+            std::string source_path = map.source;
+            if (source_path.starts_with("slotId:")) {
+                const std::string slot = source_path.substr(7);
+                source_path.clear();
+                for (const ntp::DspNode& other : plugin.manifest.graph.nodes) {
+                    for (const ntp::SampleZone& zone : other.zones) {
+                        if (zone.user_assignable && zone.slot_id == slot) {
+                            source_path =
+                                zone.fallback_file.empty() ? zone.file : zone.fallback_file;
+                        }
                     }
                 }
-                names.push_back(name);
-                return static_cast<int>(names.size() - 1);
-            };
-            rr_group_of_zone_.push_back(intern(rr_names, zone.round_robin_group));
-            choke_group_of_zone_.push_back(intern(choke_names, zone.choke_group));
+            }
+            const auto it = plugin.samples.find(source_path);
+            slice_buffer_ = it != plugin.samples.end() ? it->second.get() : nullptr;
+
+            std::vector<std::string> slice_rr_names;
+            slice_note_.reserve(map.slices.size());
+            slice_choke_of_.reserve(map.slices.size());
+            slice_rr_of_.reserve(map.slices.size());
+            slice_cut_on_off_.reserve(map.slices.size());
+            for (std::size_t s = 0; s < map.slices.size(); ++s) {
+                const ntp::SliceEntry& slice = map.slices[s];
+                slice_note_.push_back(slice.note >= 0 ? slice.note
+                                                      : ntp::kSliceBaseNote + static_cast<int>(s));
+                slice_choke_of_.push_back(intern_group(choke_names, slice.choke_group));
+                slice_rr_of_.push_back(intern_group(slice_rr_names, slice.round_robin_group));
+                slice_cut_on_off_.push_back(
+                    map.trigger_mode == ntp::SliceTriggerMode::kGated && slice.release_on_gate ? 1
+                                                                                               : 0);
+            }
+            slice_rr_counters_.assign(slice_rr_names.size(), 0);
+            slice_rr_advanced_.assign(slice_rr_names.size(), 0);
         }
-        rr_counters_.assign(rr_names.size(), 0);
         break;
     }
     case ntp::NodeType::kNativeStage:
@@ -421,11 +474,44 @@ void NodeRuntime::process_wavetable(float* out, std::uint32_t frames) {
     }
 }
 
+NodeRuntime::SamplerVoice* NodeRuntime::allocate_sampler_voice() {
+    for (SamplerVoice& voice : sampler_voices_) {
+        if (!voice.active) {
+            return &voice;
+        }
+    }
+    if (def_->voice_stealing == "none") {
+        return nullptr;
+    }
+    SamplerVoice* slot = sampler_voices_.data();
+    for (SamplerVoice& voice : sampler_voices_) {
+        const bool older = voice.age < slot->age;
+        const bool quieter = voice.gain < slot->gain;
+        if (def_->voice_stealing == "quietest" ? quieter : older) {
+            slot = &voice;
+        }
+    }
+    return slot;
+}
+
+void NodeRuntime::choke_sampler_voices(int choke_group) {
+    for (SamplerVoice& voice : sampler_voices_) {
+        if (voice.active && voice.choke == choke_group) {
+            voice.active = false;
+        }
+    }
+}
+
 void NodeRuntime::sampler_note_on(int note, float velocity) {
     const int vel_127 = std::clamp(static_cast<int>(velocity * 127.0F), 1, 127);
     for (std::size_t z = 0; z < def_->zones.size(); ++z) {
         const ntp::SampleZone& zone = def_->zones[z];
-        const audio::SampleBuffer* buffer = zone_buffers_[z];
+        // User override first, baked archive sample (fallbackFile for
+        // user-assignable zones) second.
+        const audio::SampleBuffer* override_buffer =
+            zone_override_[z].load(std::memory_order_acquire);
+        const audio::SampleBuffer* buffer =
+            override_buffer != nullptr ? override_buffer : zone_buffers_[z];
         if (buffer == nullptr || zone.release_trigger) {
             continue;
         }
@@ -450,39 +536,14 @@ void NodeRuntime::sampler_note_on(int note, float velocity) {
                 continue;
             }
         }
-        // Choke: cut same-group voices.
+        // Choke: cut same-group voices (zone or slice alike).
         const int choke = choke_group_of_zone_[z];
         if (choke >= 0) {
-            for (SamplerVoice& voice : sampler_voices_) {
-                if (voice.active && voice.zone != nullptr) {
-                    const auto other = static_cast<std::size_t>(voice.zone - def_->zones.data());
-                    if (other < choke_group_of_zone_.size() &&
-                        choke_group_of_zone_[other] == choke) {
-                        voice.active = false;
-                    }
-                }
-            }
+            choke_sampler_voices(choke);
         }
-        // Voice allocation with the node's stealing policy.
-        SamplerVoice* slot = nullptr;
-        for (SamplerVoice& voice : sampler_voices_) {
-            if (!voice.active) {
-                slot = &voice;
-                break;
-            }
-        }
+        SamplerVoice* slot = allocate_sampler_voice();
         if (slot == nullptr) {
-            if (def_->voice_stealing == "none") {
-                continue;
-            }
-            slot = sampler_voices_.data();
-            for (SamplerVoice& voice : sampler_voices_) {
-                const bool older = voice.age < slot->age;
-                const bool quieter = voice.gain < slot->gain;
-                if (def_->voice_stealing == "quietest" ? quieter : older) {
-                    slot = &voice;
-                }
-            }
+            continue; // stealing policy "none" with a full pool
         }
         const auto rate_frames = static_cast<double>(buffer->rate);
         slot->buffer = buffer;
@@ -500,23 +561,97 @@ void NodeRuntime::sampler_note_on(int note, float velocity) {
                               : buffer->frames;
         slot->gain = velocity;
         slot->note = note;
+        slot->choke = choke;
+        slot->slice_index = -1;
         slot->released = false;
         slot->age = ++sampler_clock_;
         slot->active = true;
         break; // one zone per trigger (after RR/choke resolution)
     }
     // Advance every matching round-robin group counter once per trigger.
-    std::vector<bool> advanced(rr_counters_.size(), false);
+    std::fill(rr_advanced_.begin(), rr_advanced_.end(), std::uint8_t{0});
     for (std::size_t z = 0; z < def_->zones.size(); ++z) {
         const ntp::SampleZone& zone = def_->zones[z];
         const int rr = rr_group_of_zone_[z];
-        if (rr < 0 || advanced[static_cast<std::size_t>(rr)]) {
+        if (rr < 0 || rr_advanced_[static_cast<std::size_t>(rr)] != 0) {
             continue;
         }
         if (note >= zone.key_lo && note <= zone.key_hi && vel_127 >= zone.vel_lo &&
             vel_127 <= zone.vel_hi) {
             ++rr_counters_[static_cast<std::size_t>(rr)];
-            advanced[static_cast<std::size_t>(rr)] = true;
+            rr_advanced_[static_cast<std::size_t>(rr)] = 1;
+        }
+    }
+
+    // ── Slices ───────────────────────────────────────────────────────
+    // Same trigger discipline as zones: note match, RR gate, choke cut,
+    // one slice per trigger. Chops play at source pitch (no tracking).
+    if (def_->slice_map.has_value() && !slice_note_.empty()) {
+        const audio::SampleBuffer* override_buffer =
+            slice_override_.load(std::memory_order_acquire);
+        const audio::SampleBuffer* buffer =
+            override_buffer != nullptr ? override_buffer : slice_buffer_;
+        if (buffer == nullptr) {
+            return;
+        }
+        const std::vector<ntp::SliceEntry>& slices = def_->slice_map->slices;
+        for (std::size_t s = 0; s < slices.size(); ++s) {
+            if (slice_note_[s] != note || vel_127 < slices[s].velocity_min) {
+                continue;
+            }
+            const int rr = slice_rr_of_[s];
+            if (rr >= 0) {
+                int members = 0;
+                int my_index = 0;
+                for (std::size_t other = 0; other < slices.size(); ++other) {
+                    if (slice_rr_of_[other] == rr) {
+                        if (other == s) {
+                            my_index = members;
+                        }
+                        ++members;
+                    }
+                }
+                if (members > 1 &&
+                    (slice_rr_counters_[static_cast<std::size_t>(rr)] % members) != my_index) {
+                    continue;
+                }
+            }
+            const int choke = slice_choke_of_[s];
+            if (choke >= 0) {
+                choke_sampler_voices(choke);
+            }
+            SamplerVoice* slot = allocate_sampler_voice();
+            if (slot == nullptr) {
+                continue;
+            }
+            const auto rate_frames = static_cast<double>(buffer->rate);
+            slot->buffer = buffer;
+            slot->zone = nullptr;
+            slot->pos = slices[s].start * rate_frames;
+            slot->step = 1.0;
+            slot->direction = 1;
+            slot->loop_start = 0.0;
+            slot->loop_end = 0.0;
+            slot->end_frame = std::min<double>(buffer->frames, slices[s].end * rate_frames);
+            slot->gain = velocity;
+            slot->note = note;
+            slot->choke = choke;
+            slot->slice_index = static_cast<int>(s);
+            slot->released = false;
+            slot->age = ++sampler_clock_;
+            slot->active = true;
+            break;
+        }
+        std::fill(slice_rr_advanced_.begin(), slice_rr_advanced_.end(), std::uint8_t{0});
+        for (std::size_t s = 0; s < slices.size(); ++s) {
+            const int rr = slice_rr_of_[s];
+            if (rr < 0 || slice_rr_advanced_[static_cast<std::size_t>(rr)] != 0) {
+                continue;
+            }
+            if (slice_note_[s] == note && vel_127 >= slices[s].velocity_min) {
+                ++slice_rr_counters_[static_cast<std::size_t>(rr)];
+                slice_rr_advanced_[static_cast<std::size_t>(rr)] = 1;
+            }
         }
     }
 }
@@ -528,13 +663,22 @@ void NodeRuntime::sampler_note_off(int note) {
             if (voice.zone != nullptr && voice.zone->loop == ntp::LoopMode::kRelease) {
                 voice.active = false; // release loops end the sustain portion
             }
+            // Gated slices cut on noteOff (per-slice releaseOnGate
+            // opt-out); one-shot slices play out.
+            if (voice.slice_index >= 0 &&
+                slice_cut_on_off_[static_cast<std::size_t>(voice.slice_index)] != 0) {
+                voice.active = false;
+            }
         }
     }
     // Release-triggered zones fire now.
     const int vel_127 = 100;
     for (std::size_t z = 0; z < def_->zones.size(); ++z) {
         const ntp::SampleZone& zone = def_->zones[z];
-        const audio::SampleBuffer* buffer = zone_buffers_[z];
+        const audio::SampleBuffer* override_buffer =
+            zone_override_[z].load(std::memory_order_acquire);
+        const audio::SampleBuffer* buffer =
+            override_buffer != nullptr ? override_buffer : zone_buffers_[z];
         if (buffer == nullptr || !zone.release_trigger) {
             continue;
         }
@@ -559,11 +703,38 @@ void NodeRuntime::sampler_note_off(int note) {
             voice.end_frame = buffer->frames;
             voice.gain = 0.8F;
             voice.note = note;
+            voice.choke = choke_group_of_zone_[z];
+            voice.slice_index = -1;
             voice.released = true;
             voice.age = ++sampler_clock_;
             voice.active = true;
             break;
         }
+    }
+}
+
+void NodeRuntime::sampler_reset() {
+    for (SamplerVoice& voice : sampler_voices_) {
+        voice.active = false;
+        voice.buffer = nullptr;
+    }
+}
+
+void NodeRuntime::set_slot_override_buffer(const std::string& slot_id,
+                                           const audio::SampleBuffer* buffer) {
+    if (def_->type != ntp::NodeType::kSampler) {
+        return;
+    }
+    for (std::size_t z = 0; z < def_->zones.size(); ++z) {
+        const ntp::SampleZone& zone = def_->zones[z];
+        if (zone.user_assignable && zone.slot_id == slot_id) {
+            zone_override_[z].store(buffer, std::memory_order_release);
+        }
+    }
+    // A slot-sourced slice map retargets with its slot, even when the
+    // owning zone lives on another sampler node.
+    if (def_->slice_map.has_value() && def_->slice_map->source == "slotId:" + slot_id) {
+        slice_override_.store(buffer, std::memory_order_release);
     }
 }
 

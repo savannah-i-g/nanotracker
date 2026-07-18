@@ -187,6 +187,99 @@ ntp::LoopMode loop_mode_from(const json& j) {
 
 // ── Section parsers ──────────────────────────────────────────────────
 
+// "grid:N" → N; anything else (including bare "grid") → nullopt.
+std::optional<int> grid_slice_count(const std::string& auto_detect) {
+    if (!auto_detect.starts_with("grid:")) {
+        return std::nullopt;
+    }
+    const std::string count = auto_detect.substr(5);
+    if (count.empty() || count.size() > 3 ||
+        !std::all_of(count.begin(), count.end(),
+                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        return std::nullopt;
+    }
+    return std::stoi(count);
+}
+
+ntp::SliceMap parse_slice_map(const json& j, const std::string& node_id,
+                              std::vector<std::string>& errors) {
+    ntp::SliceMap map;
+    map.source = j.value("source", "");
+    if (map.source.empty()) {
+        errors.push_back("node \"" + node_id + "\": sliceMap needs a source");
+    }
+    const std::string mode = j.value("triggerMode", "oneShot");
+    if (mode == "gated") {
+        map.trigger_mode = ntp::SliceTriggerMode::kGated;
+    } else if (mode != "oneShot") {
+        errors.push_back("node \"" + node_id +
+                         "\": sliceMap triggerMode must be "
+                         "\"oneShot\" or \"gated\" (got \"" +
+                         mode + "\")");
+    }
+
+    for (const json& sj : j.value("slices", json::array())) {
+        ntp::SliceEntry slice;
+        slice.start = sj.value("start", 0.0);
+        slice.end = sj.value("end", 0.0);
+        slice.note = sj.value("note", -1);
+        slice.velocity_min = sj.value("velocity", 1);
+        slice.choke_group = sj.value("choke", "");
+        slice.round_robin_group = sj.value("roundRobinGroup", "");
+        slice.release_on_gate = sj.value("releaseOnGate", true);
+        const std::size_t index = map.slices.size();
+        if (slice.start < 0.0 || slice.end <= slice.start) {
+            errors.push_back("node \"" + node_id + "\": slice " + std::to_string(index) +
+                             " needs 0 <= start < end");
+        }
+        if (slice.note > 127) {
+            errors.push_back("node \"" + node_id + "\": slice " + std::to_string(index) +
+                             " note outside 0-127");
+        }
+        if (slice.note < 0 && ntp::kSliceBaseNote + static_cast<int>(index) > 127) {
+            errors.push_back("node \"" + node_id + "\": slice " + std::to_string(index) +
+                             " has no note and the default 36+index exceeds 127");
+        }
+        if (slice.velocity_min < 1 || slice.velocity_min > 127) {
+            errors.push_back("node \"" + node_id + "\": slice " + std::to_string(index) +
+                             " velocity outside 1-127");
+        }
+        map.slices.push_back(std::move(slice));
+    }
+
+    // autoDetect and authored slices are exclusive: the loader either
+    // takes the author's list verbatim or derives one.
+    if (j.contains("autoDetect") && !j["autoDetect"].is_null()) {
+        map.auto_detect = j["autoDetect"].is_string() ? j["autoDetect"].get<std::string>() : "";
+        if (!map.slices.empty()) {
+            errors.push_back("node \"" + node_id +
+                             "\": sliceMap has both slices[] and autoDetect — author one");
+        }
+        if (map.auto_detect == "transients") {
+            // The web's onset detector never shipped (v4.1.0 fell back
+            // to grid:16); the native detector is parked the same way.
+            // Normalised here so the runtime only ever sees grid.
+            map.auto_detect = "grid:16";
+        }
+        if (map.auto_detect == "markers") {
+            errors.push_back("node \"" + node_id +
+                             "\": autoDetect \"markers\" (WAV cue chunks) is not in native v1 — "
+                             "author explicit slices[]");
+        } else {
+            const std::optional<int> count = grid_slice_count(map.auto_detect);
+            if (!count.has_value() || *count < 1 || ntp::kSliceBaseNote + *count - 1 > 127) {
+                errors.push_back("node \"" + node_id +
+                                 "\": autoDetect must be \"grid:N\" "
+                                 "(N 1-92), got \"" +
+                                 map.auto_detect + "\"");
+            }
+        }
+    } else if (map.slices.empty()) {
+        errors.push_back("node \"" + node_id + "\": sliceMap needs slices[] or autoDetect");
+    }
+    return map;
+}
+
 ntp::DspNode parse_node(const json& j, std::vector<std::string>& errors, bool is_instrument) {
     ntp::DspNode node;
     node.id = j.value("id", "");
@@ -282,13 +375,34 @@ ntp::DspNode parse_node(const json& j, std::vector<std::string>& errors, bool is
         zone.round_robin_group = zj.value("roundRobinGroup", "");
         zone.choke_group = zj.value("choke", "");
         zone.release_trigger = zj.value("trigger", "attack") == std::string("release");
-        if (zone.file.empty()) {
+        zone.user_assignable = zj.value("userAssignable", false);
+        zone.slot_id = zj.value("slotId", "");
+        zone.slot_label = zj.value("slotLabel", "");
+        zone.fallback_file = zj.value("fallbackFile", "");
+        zone.max_duration_sec = zj.value("maxDurationSec", 0.0);
+        if (zone.user_assignable) {
+            // Strict slot contract: a stable id (POVR keys on it) and
+            // an authored default (a fresh install must never be
+            // silent). The web only "strongly recommended" the
+            // fallback; native refuses (fix-don't-retain).
+            if (zone.slot_id.empty()) {
+                errors.push_back("node \"" + node.id + "\": user-assignable zone needs a slotId");
+            }
+            if (zone.fallback_file.empty()) {
+                errors.push_back("node \"" + node.id + "\": user-assignable zone \"" +
+                                 zone.slot_id + "\" needs a fallbackFile");
+            }
+        } else if (zone.file.empty()) {
             errors.push_back("node \"" + node.id + "\": sampler zone without a file");
         }
         node.zones.push_back(std::move(zone));
     }
-    if (node.type == ntp::NodeType::kSampler && node.zones.empty()) {
-        errors.push_back("node \"" + node.id + "\": sampler needs at least one zone");
+
+    if (node.type == ntp::NodeType::kSampler && j.contains("sliceMap")) {
+        node.slice_map = parse_slice_map(j["sliceMap"], node.id, errors);
+    }
+    if (node.type == ntp::NodeType::kSampler && node.zones.empty() && !node.slice_map.has_value()) {
+        errors.push_back("node \"" + node.id + "\": sampler needs at least one zone or a sliceMap");
     }
     if (node.type == ntp::NodeType::kGranular && node.sample_file.empty()) {
         errors.push_back("node \"" + node.id + "\": granular needs sampleFile");
@@ -400,9 +514,12 @@ bool parse_ntp_manifest(const std::string& json_text, ntp::Manifest& manifest,
     const bool is_instrument = manifest.type == ntp::PluginType::kInstrument;
 
     for (const std::string& requirement : root.value("requires", std::vector<std::string>{})) {
-        // v1 defines no optional capabilities; anything here is from a
-        // newer host or the unconverted web format. Strict refusal.
-        errors.push_back("unknown capability requirement \"" + requirement + "\"");
+        // "userSamples" (user-assignable slots + POVR persistence) is
+        // the one v1 capability; anything else is from a newer host or
+        // the unconverted web format. Strict refusal.
+        if (requirement != "userSamples") {
+            errors.push_back("unknown capability requirement \"" + requirement + "\"");
+        }
         manifest.required_caps.push_back(requirement);
     }
 
@@ -447,6 +564,39 @@ bool parse_ntp_manifest(const std::string& json_text, ntp::Manifest& manifest,
             errors.push_back("duplicate node id \"" + node.id + "\"");
         }
         manifest.graph.nodes.push_back(std::move(node));
+    }
+
+    // Plugin-wide slot checks: ids are the POVR persistence keys, so
+    // they must be unique across every sampler node, and slot-sourced
+    // slice maps must reference a slot that exists.
+    const bool has_user_samples_cap =
+        std::find(manifest.required_caps.begin(), manifest.required_caps.end(), "userSamples") !=
+        manifest.required_caps.end();
+    std::set<std::string> slot_ids;
+    for (const ntp::DspNode& node : manifest.graph.nodes) {
+        for (const ntp::SampleZone& zone : node.zones) {
+            if (!zone.user_assignable || zone.slot_id.empty()) {
+                continue;
+            }
+            if (!slot_ids.insert(zone.slot_id).second) {
+                errors.push_back("node \"" + node.id + "\": duplicate slot id \"" + zone.slot_id +
+                                 "\"");
+            }
+            if (!has_user_samples_cap) {
+                errors.push_back("node \"" + node.id + "\": user-assignable zone \"" +
+                                 zone.slot_id + R"(" needs "userSamples" in requires[])");
+            }
+        }
+    }
+    for (const ntp::DspNode& node : manifest.graph.nodes) {
+        if (!node.slice_map.has_value() || !node.slice_map->source.starts_with("slotId:")) {
+            continue;
+        }
+        const std::string slot = node.slice_map->source.substr(7);
+        if (!slot_ids.contains(slot)) {
+            errors.push_back("node \"" + node.id +
+                             "\": sliceMap source references unknown slot \"" + slot + "\"");
+        }
     }
     auto endpoint_ok = [&](const std::string& name, bool as_source) {
         if (node_ids.contains(name)) {
@@ -716,11 +866,68 @@ std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std:
             break;
         case ntp::NodeType::kSampler:
             for (const ntp::SampleZone& zone : node.zones) {
-                decode_sample(zone.file, "zone file", node.id);
+                // User-assignable zones may author only a fallback;
+                // both decode when both exist (fallback is what plays
+                // until the user assigns).
+                if (!zone.file.empty()) {
+                    decode_sample(zone.file, "zone file", node.id);
+                }
+                if (!zone.fallback_file.empty()) {
+                    decode_sample(zone.fallback_file, "fallbackFile", node.id);
+                }
+            }
+            if (node.slice_map.has_value() && !node.slice_map->source.empty() &&
+                !node.slice_map->source.starts_with("slotId:")) {
+                decode_sample(node.slice_map->source, "sliceMap source", node.id);
             }
             break;
         default:
             break;
+        }
+    }
+
+    // ── Slice-map grid expansion ─────────────────────────────────────
+    // "grid:N" needs the source duration, so it resolves here — after
+    // asset decode — into N equal author-shaped slices. The runtime
+    // then never distinguishes derived from authored slices.
+    for (ntp::DspNode& node : plugin->manifest.graph.nodes) {
+        if (node.type != ntp::NodeType::kSampler || !node.slice_map.has_value()) {
+            continue;
+        }
+        ntp::SliceMap& map = *node.slice_map;
+        const std::optional<int> grid = grid_slice_count(map.auto_detect);
+        if (!grid.has_value()) {
+            continue; // author-supplied slices (validation caught the rest)
+        }
+        std::string source_path = map.source;
+        if (source_path.starts_with("slotId:")) {
+            const std::string slot = source_path.substr(7);
+            source_path.clear();
+            // Slot ids are plugin-wide (validated above), so the owning
+            // zone may live on another sampler node.
+            for (const ntp::DspNode& other : plugin->manifest.graph.nodes) {
+                for (const ntp::SampleZone& zone : other.zones) {
+                    if (zone.user_assignable && zone.slot_id == slot) {
+                        source_path = zone.fallback_file.empty() ? zone.file : zone.fallback_file;
+                        break;
+                    }
+                }
+            }
+        }
+        const auto it = plugin->samples.find(source_path);
+        if (it == plugin->samples.end() || it->second->rate == 0) {
+            errors.push_back("node \"" + node.id + "\": sliceMap grid source \"" + map.source +
+                             "\" has no decodable audio");
+            continue;
+        }
+        const double duration =
+            static_cast<double>(it->second->frames) / static_cast<double>(it->second->rate);
+        map.slices.reserve(static_cast<std::size_t>(*grid));
+        for (int i = 0; i < *grid; ++i) {
+            ntp::SliceEntry slice;
+            slice.start = duration * i / *grid;
+            slice.end = duration * (i + 1) / *grid;
+            map.slices.push_back(slice);
         }
     }
 

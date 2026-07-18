@@ -19,11 +19,18 @@
 namespace nt::io {
 
 // Everything the writer needs beyond the engine project. The session
-// assembles this from its live state; POVR passes through verbatim.
+// assembles this from its live state. POVR: `povr` entries serialise
+// into the web-compatible block v1 (grouped by instance id in
+// first-appearance order, each unique hash's bytes emitted once);
+// when `povr` is empty a non-empty `povr_raw` — a block the reader
+// could not interpret — passes through verbatim instead. Entries win
+// over raw when both are set (live state beats an uninterpretable
+// carry).
 struct FtrkWriteExtras {
     std::string workspace_json; // WPBR payload
     std::vector<FtrkBundledPlugin> plugins;
     std::string pprs_json;
+    std::vector<FtrkPovrOverride> povr;
     std::vector<std::uint8_t> povr_raw;
     std::vector<FtrkExternalPlugin> external;
 };

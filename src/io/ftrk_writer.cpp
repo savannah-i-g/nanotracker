@@ -312,8 +312,56 @@ std::vector<std::uint8_t> write_ftrk(const engine::TrackerProject& project,
         }
     }
 
-    // ── POVR (verbatim round-trip) ───────────────────────────────────
-    if (!extras.povr_raw.empty()) {
+    // ── POVR (plugin sample overrides, block v1 — web shape) ─────────
+    if (!extras.povr.empty()) {
+        out.patch_u32(reserved_pos + 20, static_cast<std::uint32_t>(out.bytes.size()));
+        out.magic("POVR");
+        out.u8(1); // block version
+        // Group by instance id, first-appearance order (the web
+        // serialiser's Map-insertion grouping).
+        std::vector<std::string> instance_ids;
+        for (const FtrkPovrOverride& entry : extras.povr) {
+            if (std::find(instance_ids.begin(), instance_ids.end(), entry.instance_id) ==
+                instance_ids.end()) {
+                instance_ids.push_back(entry.instance_id);
+            }
+        }
+        out.u16(static_cast<std::uint16_t>(instance_ids.size()));
+        // Dedup: each unique hash's bytes appear once; later
+        // references carry byteLen 0 and the reader re-expands.
+        std::vector<std::string> seen_hashes;
+        for (const std::string& instance_id : instance_ids) {
+            out.str16(instance_id);
+            std::uint16_t slot_count = 0;
+            for (const FtrkPovrOverride& entry : extras.povr) {
+                if (entry.instance_id == instance_id) {
+                    ++slot_count;
+                }
+            }
+            out.u16(slot_count);
+            for (const FtrkPovrOverride& entry : extras.povr) {
+                if (entry.instance_id != instance_id) {
+                    continue;
+                }
+                out.str16(entry.slot_id);
+                out.str16(entry.hash);
+                out.str16(entry.name);
+                out.u32(entry.sample_rate);
+                out.u8(entry.channels);
+                out.f32(entry.duration);
+                const bool first = std::find(seen_hashes.begin(), seen_hashes.end(), entry.hash) ==
+                                   seen_hashes.end();
+                if (first) {
+                    seen_hashes.push_back(entry.hash);
+                    out.u32(static_cast<std::uint32_t>(entry.bytes.size()));
+                    out.blob(entry.bytes);
+                } else {
+                    out.u32(0);
+                }
+            }
+        }
+    } else if (!extras.povr_raw.empty()) {
+        // A block the reader could not interpret round-trips verbatim.
         out.patch_u32(reserved_pos + 20, static_cast<std::uint32_t>(out.bytes.size()));
         out.blob(extras.povr_raw);
     }

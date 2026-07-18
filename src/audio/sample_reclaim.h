@@ -31,7 +31,10 @@
 //  3. From the applying pull onward the engine holds the new bundle
 //     for the whole pull (drain precedes rendering): kSetBundle
 //     deactivates every voice class that holds a SampleBuffer*
-//     (channel, sequence-layer, one-shot preview) in the same drain,
+//     (channel, sequence-layer, one-shot preview, and — via
+//     plugin_reset() on every bound instance — plugin-internal
+//     sampler voices, whose zone/slice override buffers retire
+//     through this same fence) in the same drain,
 //     so no voice carries a stale pointer across the swap; kSwapBundle
 //     keeps voices alive but its sender contract (audio_engine.h)
 //     requires an identical project and sample set, so surviving

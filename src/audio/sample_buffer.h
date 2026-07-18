@@ -19,6 +19,7 @@ struct SampleBuffer {
     std::uint32_t frames = 0;
     std::uint32_t rate = 0; // always the rate it was resampled to
     std::uint32_t source_rate = 0;
+    std::uint32_t source_channels = 0; // pre-normalisation channel count
     std::string name;
 };
 

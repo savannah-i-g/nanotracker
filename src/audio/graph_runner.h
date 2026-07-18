@@ -99,6 +99,13 @@ public:
     // value, already clamped to 0..1. Each binding maps it into its
     // own parameter domain. Default: no parameter surface.
     virtual void plugin_set_param_cv(int /*param_index*/, float /*value01*/) {}
+
+    // Full voice reset, run in the engine's kSetBundle drain. Bindings
+    // that latch SampleBuffer* into voices (NTP sampler zones/slices)
+    // must drop every reference here so the reclamation fence holds
+    // for retired buffers (audio/sample_reclaim.h). Audio thread,
+    // allocation-free. Default: nothing latched, nothing to drop.
+    virtual void plugin_reset() {}
 };
 
 struct GateEvent {
@@ -129,6 +136,11 @@ public:
     // Binds a plugin instance to a kPlugin node (model index). Called
     // at build time, before the runner reaches the audio thread.
     void bind_plugin(int node_index, GraphPluginBinding* binding);
+
+    // Audio thread (kSetBundle drain): plugin_reset() on every bound
+    // instance so no plugin voice carries a retired SampleBuffer*
+    // across a bundle replacement.
+    void reset_plugins();
 
     // Test access: the current-block buffer of an output port (stereo
     // frames*2 for audio, frames for cv), the summed input of an audio

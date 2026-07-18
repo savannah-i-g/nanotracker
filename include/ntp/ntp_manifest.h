@@ -16,6 +16,7 @@
 // deliberately depends on the C++ standard library only.
 #pragma once
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -97,6 +98,52 @@ struct SampleZone {
     std::string round_robin_group; // same-group zones rotate
     std::string choke_group;       // same-group zones cut each other
     bool release_trigger = false;  // plays on noteOff
+
+    // ── User-assignable slot (requires "userSamples" in requires[]) ──
+    // A user-assignable zone exposes a slot the user drops their own
+    // sample into at runtime; overrides persist per instance in the
+    // .ftrk POVR block, keyed by `slot_id` and content hash. When no
+    // override exists the zone plays `fallback_file` (required — a
+    // fresh install must never play silence). `slot_id` must be stable
+    // across plugin versions or prior saves cannot locate the slot.
+    bool user_assignable = false;
+    std::string slot_id;
+    std::string slot_label;        // picker display; slot_id if empty
+    std::string fallback_file;     // archive-relative default sample
+    double max_duration_sec = 0.0; // 0 = no cap on user samples
+};
+
+// ── Slice maps (MPC-style chopping) ──────────────────────────────────
+
+// The host's default note mapping for slices without an authored note:
+// slice index i triggers on MIDI note kSliceBaseNote + i (GM kick + N).
+inline constexpr int kSliceBaseNote = 36;
+
+// "oneShot" plays a triggered slice to its end; "gated" cuts the voice
+// on noteOff (per-slice `release_on_gate` opts a slice out).
+enum class SliceTriggerMode : unsigned char { kOneShot, kGated };
+
+struct SliceEntry {
+    double start = 0.0; // seconds into the source buffer
+    double end = 0.0;   // seconds; duration = end - start
+    int note = -1;      // trigger note; -1 = kSliceBaseNote + index
+    int velocity_min = 1;
+    std::string choke_group;       // same-group voices cut each other
+    std::string round_robin_group; // same-group slices rotate
+    bool release_on_gate = true;   // gated mode only: cut on noteOff
+};
+
+// One slice map per sampler node. Slices are author-supplied or, via
+// `auto_detect` ("grid:N"), expanded by the loader once the source
+// duration is known. A node with both zones and a slice map uses both:
+// zones handle key/vel-mapped playback, slices per-note chopping.
+struct SliceMap {
+    // Archive-relative sample path, or "slotId:<id>" to chop a
+    // user-assignable slot (overrides then retarget the slices too).
+    std::string source;
+    std::vector<SliceEntry> slices;
+    std::string auto_detect; // "" = author-supplied; "grid:N" expands
+    SliceTriggerMode trigger_mode = SliceTriggerMode::kOneShot;
 };
 
 struct DspNode {
@@ -135,6 +182,7 @@ struct DspNode {
     std::string impulse;                   // convolver (archive path)
     bool normalize = true;                 // convolver
     std::vector<SampleZone> zones;         // sampler
+    std::optional<SliceMap> slice_map;     // sampler
     int polyphony = 16;                    // sampler
     std::string voice_stealing = "oldest"; // sampler: +quietest|none
 };
@@ -265,8 +313,9 @@ struct Manifest {
     std::vector<Preset> presets;
 
     // Capability requirements (JSON "requires"; the field name avoids
-    // the C++ keyword). v1 hosts refuse unknown entries with a clear
-    // message (strict load, no degraded mode).
+    // the C++ keyword). v1 defines "userSamples" (user-assignable
+    // sample slots); hosts refuse unknown entries with a clear message
+    // (strict load, no degraded mode).
     std::vector<std::string> required_caps;
 };
 

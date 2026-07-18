@@ -484,6 +484,14 @@ void GraphRunner::bind_plugin(int node_index, GraphPluginBinding* binding) {
     }
 }
 
+void GraphRunner::reset_plugins() {
+    for (NodeSlot& node : nodes_) {
+        if (node.plugin != nullptr) {
+            node.plugin->plugin_reset();
+        }
+    }
+}
+
 const float* GraphRunner::debug_output(int node, int port) const {
     const PortSlot& slot =
         nodes_[static_cast<std::size_t>(node)].outputs[static_cast<std::size_t>(port)];

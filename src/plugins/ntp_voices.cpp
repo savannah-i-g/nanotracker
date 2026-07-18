@@ -344,7 +344,7 @@ void NtpInstance::note_on(int note, float velocity) {
         if (policy == "none") {
             return;
         }
-        slot = &voices_[0];
+        slot = voices_.data();
         for (Voice& voice : voices_) {
             if (voice.age < slot->age) {
                 slot = &voice;
@@ -399,6 +399,53 @@ void NtpInstance::all_notes_off() {
     }
 }
 
+void NtpInstance::plugin_reset() {
+    for (Voice& voice : voices_) {
+        voice.active = false;
+        voice.controls.gate = 0.0F;
+    }
+    for (GraphNode& node : nodes_) {
+        if (plugin_->manifest.graph.nodes[static_cast<std::size_t>(node.def_index)].type ==
+            ntp::NodeType::kSampler) {
+            node.slots[0].runtime->sampler_reset();
+        }
+    }
+}
+
+std::shared_ptr<audio::SampleBuffer> NtpInstance::set_slot_override(const std::string& slot_id,
+                                                                    SlotOverride entry) {
+    std::shared_ptr<audio::SampleBuffer> replaced;
+    if (const auto it = slot_overrides_.find(slot_id); it != slot_overrides_.end()) {
+        replaced = std::move(it->second.buffer);
+    }
+    // Samplers are always shared (slots[0]); the runtime fans the
+    // pointer out to every zone/slice map carrying this slot id.
+    for (GraphNode& node : nodes_) {
+        if (plugin_->manifest.graph.nodes[static_cast<std::size_t>(node.def_index)].type ==
+            ntp::NodeType::kSampler) {
+            node.slots[0].runtime->set_slot_override_buffer(slot_id, entry.buffer.get());
+        }
+    }
+    slot_overrides_[slot_id] = std::move(entry);
+    return replaced;
+}
+
+std::shared_ptr<audio::SampleBuffer> NtpInstance::clear_slot_override(const std::string& slot_id) {
+    const auto it = slot_overrides_.find(slot_id);
+    if (it == slot_overrides_.end()) {
+        return nullptr;
+    }
+    std::shared_ptr<audio::SampleBuffer> replaced = std::move(it->second.buffer);
+    slot_overrides_.erase(it);
+    for (GraphNode& node : nodes_) {
+        if (plugin_->manifest.graph.nodes[static_cast<std::size_t>(node.def_index)].type ==
+            ntp::NodeType::kSampler) {
+            node.slots[0].runtime->set_slot_override_buffer(slot_id, nullptr);
+        }
+    }
+    return replaced;
+}
+
 void NtpInstance::apply_mod_routes(int voice_index, std::uint32_t frames) {
     for (std::size_t b = 0; b < mod_bindings_.size(); ++b) {
         const ModBinding& binding = mod_bindings_[b];
@@ -440,10 +487,10 @@ void NtpInstance::apply_mod_routes(int voice_index, std::uint32_t frames) {
                          : 0.0F;
             break;
         }
-        float value = apply_transform((source * static_cast<float>(binding.def.scale)) +
-                                          static_cast<float>(binding.def.offset),
-                                      binding.def.transform) *
-                      static_cast<float>(binding.def.depth);
+        const float value = apply_transform((source * static_cast<float>(binding.def.scale)) +
+                                                static_cast<float>(binding.def.offset),
+                                            binding.def.transform) *
+                            static_cast<float>(binding.def.depth);
         ModState& state = voice_index >= 0
                               ? voices_[static_cast<std::size_t>(voice_index)].mod_states[b]
                               : shared_mod_states_[b];
@@ -466,7 +513,7 @@ void NtpInstance::process_voice_pass(int voice_index, std::uint32_t frames) {
     // Reset every pass node's param mods, apply the k-rate mod routes
     // once, then run the nodes in topological order.
     for (const int node_index : order_) {
-        GraphNode& node = nodes_[static_cast<std::size_t>(node_index)];
+        const GraphNode& node = nodes_[static_cast<std::size_t>(node_index)];
         if (node.voice_scoped != (voice_index >= 0)) {
             continue;
         }
@@ -479,7 +526,7 @@ void NtpInstance::process_voice_pass(int voice_index, std::uint32_t frames) {
     apply_mod_routes(voice_index, frames);
 
     for (const int node_index : order_) {
-        GraphNode& node = nodes_[static_cast<std::size_t>(node_index)];
+        const GraphNode& node = nodes_[static_cast<std::size_t>(node_index)];
         // Shared nodes run in the shared pass only; voice nodes in
         // voice passes only.
         if (node.voice_scoped != (voice_index >= 0)) {

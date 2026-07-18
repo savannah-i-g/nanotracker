@@ -48,6 +48,7 @@ std::unique_ptr<SampleBuffer> finish(const codec::Decoded& decoded, std::uint32_
 
     auto buffer = std::make_unique<SampleBuffer>();
     buffer->source_rate = decoded.rate;
+    buffer->source_channels = decoded.channels;
     buffer->rate = target_rate;
     if (decoded.rate == target_rate) {
         buffer->interleaved = std::move(stereo);

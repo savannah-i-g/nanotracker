@@ -23,11 +23,30 @@
 #include "audio/graph_runner.h"
 #include "plugins/ntp_graph.h"
 
+#include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nt::plugins {
+
+// One user-assigned sample slot on a plugin instance: the decoded
+// device-rate buffer the sampler plays plus everything the .ftrk POVR
+// block persists (content hash, display name, source metadata, the
+// original encoded bytes). Mirrors the web's SlotOverride +
+// blob-store record collapsed into one per-instance entry — dedup by
+// hash happens at serialisation time, not here.
+struct SlotOverride {
+    std::string hash; // "sha256:<hex>" of `bytes`
+    std::string name; // original filename (display + POVR)
+    std::uint32_t sample_rate = 0;
+    std::uint8_t channels = 0;
+    float duration = 0.0F;                       // seconds
+    std::vector<std::uint8_t> bytes;             // encoded source file
+    std::shared_ptr<audio::SampleBuffer> buffer; // device-rate decode
+};
 
 class NtpInstance final : public audio::GraphPluginBinding {
 public:
@@ -47,6 +66,12 @@ public:
     void plugin_note_on(int note, float velocity) override { note_on(note, velocity); }
 
     void plugin_note_off(int note) override { note_off(note); }
+
+    // Audio thread (kSetBundle drain): deactivates the voice pool and
+    // every sampler voice so no SampleBuffer* survives the publish —
+    // the fence that lets the session retire replaced slot-override
+    // buffers (audio/sample_reclaim.h).
+    void plugin_reset() override;
 
     // CV→param (audio thread): param_index into manifest().params;
     // value01 maps into the param's min..max. Writes the pre-resolved
@@ -77,6 +102,21 @@ public:
 
     // Peak of a node's last output block (meter controls).
     [[nodiscard]] float node_peak(const std::string& node_id) const;
+
+    // ── User sample slots (session thread) ───────────────────────────
+    // Installs/clears an override for `slot_id` across every sampler
+    // node (the runtime reads the swap through per-zone atomics at
+    // trigger time). Returns the replaced decode buffer — the caller
+    // retires it behind the reclamation fence; nothing here frees
+    // audio the render thread might still reach.
+    std::shared_ptr<audio::SampleBuffer> set_slot_override(const std::string& slot_id,
+                                                           SlotOverride entry);
+    std::shared_ptr<audio::SampleBuffer> clear_slot_override(const std::string& slot_id);
+
+    // slot id → override, for the picker UI and the POVR serialiser.
+    [[nodiscard]] const std::map<std::string, SlotOverride>& slot_overrides() const {
+        return slot_overrides_;
+    }
 
 private:
     struct NodeInstantiation {
@@ -158,6 +198,10 @@ private:
     bool has_voice_envelopes_ = false;
 
     std::vector<std::pair<std::string, float>> host_params_; // key → value
+
+    // Session-thread override table; the audio thread only ever sees
+    // the raw buffer pointers pushed into the sampler runtimes.
+    std::map<std::string, SlotOverride> slot_overrides_;
 
     // Per host param: value range + the ParamSlot bases its dot-path
     // resolves to (empty for bare keys). Built at construction so

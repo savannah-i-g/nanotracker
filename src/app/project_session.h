@@ -55,8 +55,10 @@ public:
     bool load_ftrk(const std::filesystem::path& path);
 
     // Writes the project as .ftrk v14 (workspace, bundled NTP
-    // archives, project presets, external plugin state; POVR passes
-    // through from the loaded file). Returns false with error() set.
+    // archives, project presets, external plugin state; POVR emitted
+    // from the live per-instance override tables, plus any loaded
+    // entries that never resolved to an instance). Returns false with
+    // error() set.
     bool save_ftrk(const std::filesystem::path& path);
 
     // Offline render of the current project through a fresh engine
@@ -229,6 +231,18 @@ public:
     void preview_plugin_note(int slot, int midi_note, float velocity);
     void preview_plugin_release();
 
+    // ── User sample slots (POVR) ─────────────────────────────────────
+    // Loads a file into a plugin instance's user-assignable slot /
+    // reverts the slot to its baked fallback. Structural: the
+    // transport stops, the replaced decode buffer retires behind the
+    // republish fence (kSetBundle resets plugin voices in the same
+    // drain), and the override joins the POVR block on save. Returns
+    // false with error() set (unknown node/slot, unreadable or
+    // undecodable file, over the zone's maxDurationSec cap).
+    bool set_plugin_sample_override(const std::string& workspace_id, const std::string& slot_id,
+                                    const std::filesystem::path& path);
+    bool clear_plugin_sample_override(const std::string& workspace_id, const std::string& slot_id);
+
     // ── Sequence layers (piano roll) ─────────────────────────────────
     // Note edits reallocate the layer vectors, which the sequencer
     // scans concurrently — so they are structural: transport stops and
@@ -350,7 +364,13 @@ private:
     std::vector<std::unique_ptr<ext::Vst3Plugin>> vst3_instances_;
     std::map<std::string, ext::Vst3Plugin*> vst3_by_node_;
     std::map<std::string, std::string> ext_path_by_node_; // library paths for XPLG
-    std::vector<std::uint8_t> povr_raw_;                  // verbatim POVR round-trip
+    // POVR carries: a raw block the reader could not interpret, and
+    // parsed entries whose instance never resolved at load (missing
+    // plugin, foreign workspace id). Both re-emit on save so a
+    // load→save cycle loses nothing; live overrides themselves live
+    // on the NtpInstances.
+    std::vector<std::uint8_t> povr_raw_;
+    std::vector<io::FtrkPovrOverride> povr_pending_;
     int preview_plugin_slot_ = 0;
     int preview_plugin_note_ = -1;
 

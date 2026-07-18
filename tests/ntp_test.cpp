@@ -2,12 +2,15 @@
 // archive loading through a real in-memory ZIP, and deterministic
 // instance processing — a playable synth voice (oscillator + envelope
 // via audio-rate param connection + pitch mod route), an FX delay
-// graph, and sampler zone/round-robin behaviour.
+// graph, sampler zone/round-robin behaviour, user-assignable slot
+// overrides, and slice-map chopping (Stage 19).
 #include "plugins/ntp_loader.h"
 #include "plugins/ntp_voices.h"
+#include "rt/rt_assert.h"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <miniz.h>
@@ -57,6 +60,34 @@ std::vector<std::uint8_t> make_wav(float freq, float seconds, std::uint32_t rate
             std::sin(2.0F * 3.14159265F * freq * static_cast<float>(i) / static_cast<float>(rate));
         const auto v = static_cast<std::int16_t>(s * 20000.0F);
         put16(44 + (static_cast<std::size_t>(i) * 2), static_cast<std::uint16_t>(v));
+    }
+    return bytes;
+}
+
+// Multi-segment WAV: one pure tone per segment, so every grid slice of
+// the result is spectrally distinguishable from its neighbours.
+std::vector<std::uint8_t> make_segments_wav(const std::vector<float>& freqs, float seg_seconds,
+                                            std::uint32_t rate) {
+    const auto seg_frames = static_cast<std::uint32_t>(seg_seconds * static_cast<float>(rate));
+    const std::uint32_t frames = seg_frames * static_cast<std::uint32_t>(freqs.size());
+    std::vector<std::uint8_t> bytes = make_wav(1.0F, 0.0F, rate); // header only
+    bytes.resize(44 + (static_cast<std::size_t>(frames) * 2));
+    auto put32 = [&bytes](std::size_t at, std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) {
+            bytes[at + static_cast<std::size_t>(i)] =
+                static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
+        }
+    };
+    put32(4, 36 + (frames * 2));
+    put32(40, frames * 2);
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        const float freq = freqs[i / seg_frames];
+        const float s =
+            std::sin(2.0F * 3.14159265F * freq * static_cast<float>(i) / static_cast<float>(rate));
+        const auto v = static_cast<std::int16_t>(s * 20000.0F);
+        bytes[44 + (static_cast<std::size_t>(i) * 2)] = static_cast<std::uint8_t>(v & 0xFF);
+        bytes[45 + (static_cast<std::size_t>(i) * 2)] =
+            static_cast<std::uint8_t>((static_cast<std::uint16_t>(v) >> 8) & 0xFF);
     }
     return bytes;
 }
@@ -119,7 +150,7 @@ TEST_CASE("manifest validation is strict and collects every error", "[ntp]") {
         ],
         "connections": [{"from": "ghost", "to": "output"}]
       },
-      "requires": ["userSamples"]
+      "requires": ["webview", "userSamples"]
     })";
     CHECK_FALSE(nt::plugins::parse_ntp_manifest(bad, manifest, errors));
     const std::string all = errors_joined(errors);
@@ -132,7 +163,10 @@ TEST_CASE("manifest validation is strict and collects every error", "[ntp]") {
     CHECK(all.find("native_stage is reserved") != std::string::npos);
     CHECK(all.find("unknown type \"mystery\"") != std::string::npos);
     CHECK(all.find("unknown endpoint \"ghost\"") != std::string::npos);
-    CHECK(all.find("unknown capability requirement") != std::string::npos);
+    // "webview" is refused; "userSamples" is the one native capability
+    // (Stage 19) and must NOT be reported.
+    CHECK(all.find("unknown capability requirement \"webview\"") != std::string::npos);
+    CHECK(all.find("unknown capability requirement \"userSamples\"") == std::string::npos);
 }
 
 TEST_CASE("archive loads through a real ZIP and plays a synth voice", "[ntp]") {
@@ -309,4 +343,263 @@ TEST_CASE("sampler zones map keys and rotate round-robin groups", "[ntp]") {
         peak = std::max(peak, std::abs(v));
     }
     CHECK(peak < 1e-5F);
+}
+
+// ── Stage 19: sampler platform ───────────────────────────────────────
+
+namespace {
+
+// Renders `blocks` × 128 frames under the RT allocation guard (debug
+// builds abort on any audio-thread allocation in the trigger/render
+// paths) and returns the left channel.
+std::vector<float> render_blocks(nt::plugins::NtpInstance& instance, int blocks) {
+    std::vector<float> mono;
+    mono.reserve(static_cast<std::size_t>(blocks) * 128);
+    std::array<float, 256> block{};
+    for (int b = 0; b < blocks; ++b) {
+        {
+            [[maybe_unused]] const nt::rt::RtScope rt_scope;
+            instance.process(nullptr, block.data(), 128);
+        }
+        for (int i = 0; i < 128; ++i) {
+            mono.push_back(block[static_cast<std::size_t>(i) * 2]);
+        }
+    }
+    return mono;
+}
+
+void rt_note_on(nt::plugins::NtpInstance& instance, int note) {
+    [[maybe_unused]] const nt::rt::RtScope rt_scope;
+    instance.note_on(note, 1.0F);
+}
+
+void rt_note_off(nt::plugins::NtpInstance& instance, int note) {
+    [[maybe_unused]] const nt::rt::RtScope rt_scope;
+    instance.note_off(note);
+}
+
+} // namespace
+
+TEST_CASE("slot and slice validation failures are collected, not thrown", "[ntp]") {
+    ntp::Manifest manifest;
+    std::vector<std::string> errors;
+    // Two user-assignable zones sharing a slot id, one with no slot id
+    // or fallback, no "userSamples" capability; a slice map with a bad
+    // trigger mode, an inverted slice, a parked detector, and a
+    // slot-sourced map referencing a slot that does not exist.
+    const std::string bad = R"({
+      "ntp": 1, "id": "test.badslots", "name": "BAD", "type": "instrument",
+      "graph": {
+        "nodes": [
+          {"id": "s1", "type": "sampler", "zones": [
+            {"file": "a.wav", "userAssignable": true, "slotId": "kick",
+             "fallbackFile": "a.wav"},
+            {"file": "b.wav", "userAssignable": true, "slotId": "kick",
+             "fallbackFile": "b.wav"},
+            {"file": "c.wav", "userAssignable": true}
+          ]},
+          {"id": "s2", "type": "sampler",
+           "sliceMap": {"source": "break.wav", "triggerMode": "sideways",
+                        "slices": [{"start": 0.5, "end": 0.1}]}},
+          {"id": "s3", "type": "sampler",
+           "sliceMap": {"source": "break.wav", "autoDetect": "markers"}},
+          {"id": "s4", "type": "sampler",
+           "sliceMap": {"source": "slotId:ghost", "autoDetect": "grid:8"}}
+        ]
+      }
+    })";
+    CHECK_FALSE(nt::plugins::parse_ntp_manifest(bad, manifest, errors));
+    const std::string all = errors_joined(errors);
+    CHECK(all.find("duplicate slot id \"kick\"") != std::string::npos);
+    CHECK(all.find("needs a slotId") != std::string::npos);
+    CHECK(all.find("needs a fallbackFile") != std::string::npos);
+    CHECK(all.find("needs \"userSamples\" in requires[]") != std::string::npos);
+    CHECK(all.find("triggerMode must be") != std::string::npos);
+    CHECK(all.find("needs 0 <= start < end") != std::string::npos);
+    CHECK(all.find("\"markers\"") != std::string::npos);
+    CHECK(all.find("unknown slot \"ghost\"") != std::string::npos);
+}
+
+TEST_CASE("user slot override swaps the zone buffer and clears to fallback", "[ntp]") {
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.slotkit", "name": "SLOT KIT", "type": "instrument",
+      "requires": ["userSamples"],
+      "graph": {
+        "nodes": [{"id": "s", "type": "sampler", "zones": [
+          {"userAssignable": true, "slotId": "voice", "slotLabel": "VOICE",
+           "fallbackFile": "fallback.wav", "rootKey": 60,
+           "keyRange": {"lo": 60, "hi": 60}}
+        ]}],
+        "connections": [{"from": "s", "to": "output"}]
+      }
+    })";
+    const std::vector<std::uint8_t> zip = make_zip({
+        {"plugin.json", to_bytes(manifest_json)},
+        {"fallback.wav", make_wav(500.0F, 0.1F, kRate)},
+    });
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+
+    nt::plugins::NtpInstance instance(*plugin, kRate);
+    auto render_note = [&instance]() {
+        rt_note_on(instance, 60);
+        std::vector<float> mono = render_blocks(instance, 18);
+        rt_note_off(instance, 60);
+        render_blocks(instance, 24); // drain
+        return mono;
+    };
+
+    // Baked fallback plays before any override.
+    const std::vector<float> before = render_note();
+    CHECK(goertzel(before, kRate, 500.0F) > goertzel(before, kRate, 900.0F) * 3.0F);
+
+    // Override: decode a 900 Hz user sample through the standard path.
+    const std::vector<std::uint8_t> user_wav = make_wav(900.0F, 0.1F, kRate);
+    std::string format;
+    std::string decode_error;
+    std::shared_ptr<nt::audio::SampleBuffer> user_buffer = nt::audio::load_sample_memory(
+        user_wav.data(), user_wav.size(), kRate, format, decode_error);
+    REQUIRE(user_buffer != nullptr);
+    nt::plugins::SlotOverride entry;
+    entry.hash = "sha256:test";
+    entry.name = "user.wav";
+    entry.buffer = user_buffer;
+    CHECK(instance.set_slot_override("voice", std::move(entry)) == nullptr);
+
+    const std::vector<float> after = render_note();
+    CHECK(goertzel(after, kRate, 900.0F) > goertzel(after, kRate, 500.0F) * 3.0F);
+    REQUIRE(instance.slot_overrides().contains("voice"));
+
+    // Clear reverts to the fallback and hands the buffer back for
+    // retirement.
+    CHECK(instance.clear_slot_override("voice") == user_buffer);
+    const std::vector<float> reverted = render_note();
+    CHECK(goertzel(reverted, kRate, 500.0F) > goertzel(reverted, kRate, 900.0F) * 3.0F);
+}
+
+TEST_CASE("slice map grid-chops a break with one-shot and gated triggers", "[ntp]") {
+    // Eight 50 ms segments, mutually non-harmonic tones — every slice
+    // is spectrally distinguishable from its neighbours.
+    const std::vector<float> freqs = {380.0F, 500.0F, 620.0F,  740.0F,
+                                      860.0F, 980.0F, 1100.0F, 1220.0F};
+    const std::vector<std::uint8_t> break_wav = make_segments_wav(freqs, 0.05F, kRate);
+    auto manifest_json = [](const char* mode) {
+        return std::string(R"({
+          "ntp": 1, "id": "test.chop", "name": "CHOP", "type": "instrument",
+          "graph": {
+            "nodes": [{"id": "s", "type": "sampler",
+              "sliceMap": {"source": "break.wav", "autoDetect": "grid:8",
+                           "triggerMode": ")") +
+               mode + R"("}}],
+            "connections": [{"from": "s", "to": "output"}]
+          }
+        })";
+    };
+
+    SECTION("one-shot plays out past noteOff; default notes map 36+index") {
+        const std::vector<std::uint8_t> zip = make_zip({
+            {"plugin.json", to_bytes(manifest_json("oneShot"))},
+            {"break.wav", break_wav},
+        });
+        std::vector<std::string> errors;
+        auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+        INFO(errors_joined(errors));
+        REQUIRE(plugin != nullptr);
+        REQUIRE(plugin->manifest.graph.nodes[0].slice_map.has_value());
+        CHECK(plugin->manifest.graph.nodes[0].slice_map->slices.size() == 8);
+
+        nt::plugins::NtpInstance instance(*plugin, kRate);
+        // Note 39 = 36 + 3 → slice 3.
+        rt_note_on(instance, 39);
+        const std::vector<float> held = render_blocks(instance, 4); // 512 fr
+        rt_note_off(instance, 39);
+        // One-shot: the slice keeps sounding after noteOff...
+        const std::vector<float> tail = render_blocks(instance, 10);
+        CHECK(goertzel(held, kRate, freqs[3]) > goertzel(held, kRate, freqs[2]) * 3.0F);
+        CHECK(goertzel(tail, kRate, freqs[3]) > 0.1F);
+        // ...but ends at the slice boundary (2400 frames total).
+        render_blocks(instance, 6);
+        const std::vector<float> ended = render_blocks(instance, 4);
+        float peak = 0.0F;
+        for (const float v : ended) {
+            peak = std::max(peak, std::abs(v));
+        }
+        CHECK(peak < 1e-4F);
+    }
+
+    SECTION("gated cuts the voice on noteOff") {
+        const std::vector<std::uint8_t> zip = make_zip({
+            {"plugin.json", to_bytes(manifest_json("gated"))},
+            {"break.wav", break_wav},
+        });
+        std::vector<std::string> errors;
+        auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+        INFO(errors_joined(errors));
+        REQUIRE(plugin != nullptr);
+
+        nt::plugins::NtpInstance instance(*plugin, kRate);
+        rt_note_on(instance, 36);
+        const std::vector<float> held = render_blocks(instance, 4);
+        CHECK(goertzel(held, kRate, freqs[0]) > 0.1F);
+        rt_note_off(instance, 36);
+        const std::vector<float> cut = render_blocks(instance, 4);
+        float peak = 0.0F;
+        for (const float v : cut) {
+            peak = std::max(peak, std::abs(v));
+        }
+        CHECK(peak < 1e-4F);
+    }
+}
+
+TEST_CASE("slice choke groups cut and round-robin groups rotate", "[ntp]") {
+    // 0.0-0.4 s at 500 Hz, 0.4-0.8 s at 900 Hz. Choke pair: notes
+    // 60/61 play the long halves; RR pair: note 62 alternates two
+    // short windows, one in each half.
+    const std::vector<std::uint8_t> duo_wav = make_segments_wav({500.0F, 900.0F}, 0.4F, kRate);
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.chopgroups", "name": "CHOP GROUPS", "type": "instrument",
+      "graph": {
+        "nodes": [{"id": "s", "type": "sampler",
+          "sliceMap": {"source": "duo.wav", "triggerMode": "oneShot", "slices": [
+            {"start": 0.0, "end": 0.4, "note": 60, "choke": "grp"},
+            {"start": 0.4, "end": 0.8, "note": 61, "choke": "grp"},
+            {"start": 0.0, "end": 0.05, "note": 62, "roundRobinGroup": "rr"},
+            {"start": 0.4, "end": 0.45, "note": 62, "roundRobinGroup": "rr"}
+          ]}}],
+        "connections": [{"from": "s", "to": "output"}]
+      }
+    })";
+    const std::vector<std::uint8_t> zip = make_zip({
+        {"plugin.json", to_bytes(manifest_json)},
+        {"duo.wav", duo_wav},
+    });
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+
+    nt::plugins::NtpInstance instance(*plugin, kRate);
+
+    // Choke: slice 60 (500 Hz) is playing when slice 61 (900 Hz)
+    // fires in the same group — the capture window after the second
+    // trigger must not contain 500 Hz.
+    rt_note_on(instance, 60);
+    render_blocks(instance, 4);
+    rt_note_on(instance, 61);
+    const std::vector<float> choked = render_blocks(instance, 12);
+    CHECK(goertzel(choked, kRate, 900.0F) > 0.1F);
+    CHECK(goertzel(choked, kRate, 900.0F) > goertzel(choked, kRate, 500.0F) * 3.0F);
+    render_blocks(instance, 160); // drain both long slices fully
+
+    // Round-robin: successive note-62 triggers alternate the two
+    // short windows.
+    rt_note_on(instance, 62);
+    const std::vector<float> first = render_blocks(instance, 18);
+    render_blocks(instance, 6); // past the 0.05 s slice end
+    rt_note_on(instance, 62);
+    const std::vector<float> second = render_blocks(instance, 18);
+    CHECK(goertzel(first, kRate, 500.0F) > goertzel(first, kRate, 900.0F) * 3.0F);
+    CHECK(goertzel(second, kRate, 900.0F) > goertzel(second, kRate, 500.0F) * 3.0F);
 }

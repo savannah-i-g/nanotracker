@@ -341,6 +341,7 @@ add_executable(nanotracker
     src/plugins/preset_bank.cpp
     src/io/ftrk_reader.cpp
     src/io/ftrk_writer.cpp
+    src/io/sha256.cpp
     src/io/export_post.cpp
     src/io/export_presets.cpp
     src/io/export_render.cpp

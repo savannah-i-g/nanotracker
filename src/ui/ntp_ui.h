@@ -14,6 +14,7 @@
 #include "app/project_session.h"
 #include "ui/theme.h"
 
+#include <array>
 #include <map>
 #include <string>
 
@@ -39,8 +40,22 @@ private:
     static void draw_auto_panel(plugins::NtpInstance& instance, const ntp::Manifest& manifest);
     static void draw_param_widget(plugins::NtpInstance& instance, const ntp::ParamDef& def,
                                   bool as_knob, float width_hint);
+    // User-assignable sample slots: current assignment, load-by-path,
+    // clear-to-fallback. Rendered under the control tree whenever the
+    // manifest declares slots.
+    void draw_slot_picker(app::ProjectSession& session, const std::string& workspace_id,
+                          plugins::NtpInstance& instance, const Theme& theme);
 
     std::map<std::string, Texture> textures_; // "<plugin id>/<asset>"
+
+    // Slot picker state, keyed "<workspace id>/<slot id>" — one path
+    // field and last status per slot, persistent across frames.
+    struct SlotPickerState {
+        std::array<char, 512> path{};
+        std::string status;
+    };
+
+    std::map<std::string, SlotPickerState> slot_state_;
 };
 
 } // namespace nt::ui

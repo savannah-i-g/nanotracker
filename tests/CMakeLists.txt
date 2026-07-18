@@ -23,6 +23,7 @@ add_executable(nt_tests
     fx_chain_test.cpp
     graph_test.cpp
     ntp_test.cpp
+    povr_session_test.cpp
     clap_host_test.cpp
     midi_test.cpp
     midi_record_test.cpp
@@ -66,6 +67,7 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/ext/vst3_host.cpp
     ${CMAKE_SOURCE_DIR}/src/io/ftrk_reader.cpp
     ${CMAKE_SOURCE_DIR}/src/io/ftrk_writer.cpp
+    ${CMAKE_SOURCE_DIR}/src/io/sha256.cpp
     ${CMAKE_SOURCE_DIR}/src/io/export_post.cpp
     ${CMAKE_SOURCE_DIR}/src/io/export_presets.cpp
     ${CMAKE_SOURCE_DIR}/src/io/export_render.cpp

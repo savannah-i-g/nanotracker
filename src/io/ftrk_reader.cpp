@@ -301,6 +301,71 @@ void parse_plgb(Cursor c, std::size_t offset, FtrkExtras& extras) {
     }
 }
 
+// POVR block version 1 (web trackerSerializer.ts:432): per instance
+// { iid str16, slotCount u16, per slot { slotId str16, hash str16,
+// name str16, sampleRate u32, channels u8, duration f32, byteLen u32
+// + bytes } }. Each unique hash's bytes appear once; later references
+// carry byteLen 0 and re-use the first occurrence. Anything this
+// reader cannot interpret — unknown block version, a forward
+// reference to a hash never carried — keeps the whole block verbatim
+// in povr_raw so the writer round-trips it untouched. `end_bound` is
+// where the next block (or the file) ends: the block is not
+// self-delimiting from the header alone.
+void parse_povr(Cursor c, std::size_t offset, std::size_t end_bound, FtrkExtras& extras) {
+    const auto keep_raw = [&](const char* why) {
+        Cursor raw(c);
+        raw.seek(offset);
+        extras.povr_raw = raw.bytes(end_bound - offset);
+        extras.warnings.emplace_back(std::string("POVR: ") + why + ", block carried verbatim");
+    };
+
+    c.seek(offset);
+    if (!magic_is(c, "POVR")) {
+        extras.warnings.emplace_back("POVR: bad magic, block skipped");
+        return;
+    }
+    if (c.u8() != 1) {
+        keep_raw("unknown block version");
+        return;
+    }
+    // Parsed locally and committed whole: a truncation mid-block must
+    // not leave half the overrides adopted (the tolerant() wrapper
+    // only reports, it cannot roll back).
+    std::vector<FtrkPovrOverride> parsed;
+    std::vector<std::pair<std::string, std::size_t>> bytes_by_hash; // hash → entry index
+    const int instance_count = c.u16();
+    for (int i = 0; i < instance_count; ++i) {
+        const std::string instance_id = c.bytes_string(c.u16());
+        const int slot_count = c.u16();
+        for (int s = 0; s < slot_count; ++s) {
+            FtrkPovrOverride entry;
+            entry.instance_id = instance_id;
+            entry.slot_id = c.bytes_string(c.u16());
+            entry.hash = c.bytes_string(c.u16());
+            entry.name = c.bytes_string(c.u16());
+            entry.sample_rate = c.u32();
+            entry.channels = c.u8();
+            entry.duration = c.f32();
+            const std::uint32_t byte_len = c.u32();
+            if (byte_len > 0) {
+                entry.bytes = c.bytes(byte_len);
+                bytes_by_hash.emplace_back(entry.hash, parsed.size());
+            } else {
+                const auto it =
+                    std::find_if(bytes_by_hash.begin(), bytes_by_hash.end(),
+                                 [&entry](const auto& seen) { return seen.first == entry.hash; });
+                if (it == bytes_by_hash.end()) {
+                    keep_raw("dedup reference to a hash never carried");
+                    return;
+                }
+                entry.bytes = parsed[it->second].bytes;
+            }
+            parsed.push_back(std::move(entry));
+        }
+    }
+    extras.povr_overrides = std::move(parsed);
+}
+
 void parse_pprs(Cursor c, std::size_t offset, FtrkExtras& extras) {
     c.seek(offset);
     if (!magic_is(c, "PPRS")) {
@@ -390,8 +455,10 @@ std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t si
         const std::uint32_t povr_offset = version >= 12 ? (c.seek(reserved_pos + 20), c.u32()) : 0;
         const std::uint32_t pprs_offset = version >= 13 ? (c.seek(reserved_pos + 24), c.u32()) : 0;
         const std::uint32_t xplg_offset = version >= 14 ? (c.seek(reserved_pos + 28), c.u32()) : 0;
-        // v14 grew the reserved region to fit the XPLG offset.
-        c.seek(reserved_pos + (version >= 14 ? 35 : version >= 2 ? 31 : 35));
+        // Reserved region: 35 bytes in v1 and again from v14 (grown to
+        // fit the XPLG offset); 31 bytes across v2-13.
+        const std::size_t reserved_len = version >= 2 && version < 14 ? 31 : 35;
+        c.seek(reserved_pos + reserved_len);
 
         for (int i = 0; i < order_length; ++i) {
             project.order_list.push_back(c.u8());
@@ -493,9 +560,17 @@ std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t si
         }
         if (in_range(povr_offset)) {
             tolerant(extras, "POVR", [&] {
-                Cursor pc(data, size);
-                pc.seek(povr_offset);
-                extras.povr_raw = pc.bytes(size - povr_offset);
+                // POVR is not self-delimiting, so a verbatim carry
+                // needs the block's end: the nearest following block
+                // offset, else end of file. (The old to-EOF grab
+                // swallowed PPRS/XPLG into the raw copy.)
+                std::size_t end_bound = size;
+                for (const std::uint32_t other : {pprs_offset, xplg_offset}) {
+                    if (other > povr_offset && other < end_bound) {
+                        end_bound = other;
+                    }
+                }
+                parse_povr(Cursor(data, size), povr_offset, end_bound, extras);
             });
         }
         if (in_range(pprs_offset)) {

@@ -3,6 +3,41 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 19 closed — Sampler platform
+
+- Landed: **POVR user slots live** — the block parses to structured
+  per-instance/per-slot overrides (web wire shape byte-exact per
+  `trackerSerializer.ts:432-537`, hash-dedup included; unknown
+  versions carry raw byte-exact; unresolved instances persist
+  structurally and re-emit). New `io/sha256` (FIPS 180-4, std-only)
+  pinned against WebCrypto vectors so content hashes agree with the
+  web. Loader honours userAssignable/slotId/fallbackFile (strict,
+  collected errors); the sampler resolves override-first through
+  per-zone atomic buffer pointers; set/clear is structural through
+  the reclamation fence, extended by the new
+  `GraphPluginBinding::plugin_reset()` (the publish drain now
+  deactivates plugin-internal sampler voices too, so the fence proof
+  covers plugin-held buffers). Slot picker in the plugin window
+  body. **sliceMap**: manifest slices (authored or grid:N expansion;
+  transients→grid:16 recorded at load; markers refused), default
+  note 36+index, gated/one-shot with per-slice releaseOnGate,
+  choke groups interned into the shared zone namespace (slices and
+  zones cut each other), separate RR counters; ntp-convert passes
+  sliceMaps through unchanged. Three pre-existing bugs fixed en
+  route (POVR raw carry swallowed trailing blocks; stale POVR
+  survived project switches; audio-thread allocation in zone RR
+  advance). `Docs/ftrk-format.md` POVR section documented; no wire
+  growth. Five FIXES.md entries.
+- Verification: 108/108 both trees (8 new: SHA-256 vectors, POVR
+  round-trip with live overrides → same audio by hash-keyed buffer
+  equality, unknown-sub-record byte-exact passthrough across two
+  generations, override swap changes rendered spectrum, per-mode
+  slice triggers on a grid:8 click fixture — gated cut / one-shot
+  ring-out / choke cuts / RR advance, loader validation collected);
+  RT allocation guard live in the ASan tree; tidy clean; CI green
+  both platforms.
+- Backup: `NanoTracker_stage19_2026-07-18.tar.gz`; git tag `stage-19`.
+
 ## 2026-07-18 — Stage 18 closed — Local API
 
 - Landed: **LocalApiServer** (`api/local_api.{h,cpp}`, IXWebSocket

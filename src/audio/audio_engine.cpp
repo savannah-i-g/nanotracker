@@ -105,8 +105,10 @@ void AudioEngine::drain_commands() {
             channel_mask_ = 0xFFFFFFFFU;
             // A full replacement may retire sample buffers, so every
             // voice class holding a SampleBuffer* resets with it —
-            // channel voices, sequence-layer voices and the one-shot
-            // preview alike (the reclamation fence counts on this).
+            // channel voices, sequence-layer voices, the one-shot
+            // preview, and plugin-internal voices (NTP sampler
+            // zone/slice overrides) alike; the reclamation fence
+            // counts on this happening in the same drain.
             for (ChannelVoice& v : voices_) {
                 v.active = false;
             }
@@ -114,6 +116,16 @@ void AudioEngine::drain_commands() {
                 v.active = false;
             }
             voice_sample_ = nullptr;
+            if (bundle_ != nullptr) {
+                if (bundle_->graph != nullptr) {
+                    bundle_->graph->reset_plugins();
+                }
+                for (GraphPluginBinding* binding : bundle_->plugin_by_slot) {
+                    if (binding != nullptr) {
+                        binding->plugin_reset();
+                    }
+                }
+            }
             // MIDI carrier state lives as long as the bundle (the web
             // state's per-bus lifetime); held notes reset with it.
             midi_fx_state_.fill(EffectMidiState{});

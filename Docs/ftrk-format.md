@@ -101,9 +101,19 @@ colourCount u8 × { channel u8, r u8, g u8, b u8 } (sparse custom
 channel colours).
 
 ### POVR — plugin sample overrides
-Carried verbatim by the native host (web v12 shape: per-instance user
-sample slot overrides). Round-trips untouched until the native sampler
-slot UI consumes it.
+`POVR`, blockVersion u8 (1), instanceCount u16; per instance:
+instanceId str16 (plugin instance workspace id), slotCount u16; per
+slot: slotId str16, hash str16 (`sha256:<hex>` of the sample bytes),
+name str16 (original filename), sampleRate u32, channels u8,
+duration f32 (seconds), byteLen u32 + bytes (the original encoded
+file). Dedup: each unique hash's bytes appear once; later references
+carry byteLen 0 and readers re-use the first occurrence. Identical to
+the web v12 layout, so overrides stay cross-compatible.
+
+The native host parses the block into per-instance override tables
+(slots resolve override-first, baked `fallbackFile` second). Unknown
+block versions — and entries whose instance never resolves at load —
+round-trip untouched.
 
 ### PPRS — project plugin presets
 `PPRS`, blockVersion u8 (1), str32 JSON — an array of

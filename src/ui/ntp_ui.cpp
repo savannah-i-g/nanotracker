@@ -6,6 +6,7 @@
 #include <glad/gl.h>
 #include <imgui.h>
 #include <numbers>
+#include <vector>
 
 namespace nt::ui {
 
@@ -157,7 +158,7 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
             break;
         }
         const int index = std::clamp(static_cast<int>(instance.param_value(def->key)), 0,
-                               static_cast<int>(control.options.size()) - 1);
+                                     static_cast<int>(control.options.size()) - 1);
         ImGui::SetNextItemWidth(control.width > 0.0F ? control.width : 130.0F);
         if (ImGui::BeginCombo(def->label.c_str(),
                               control.options[static_cast<std::size_t>(index)].c_str())) {
@@ -299,6 +300,73 @@ void NtpUi::draw_auto_panel(plugins::NtpInstance& instance, const ntp::Manifest&
     }
 }
 
+void NtpUi::draw_slot_picker(app::ProjectSession& session, const std::string& workspace_id,
+                             plugins::NtpInstance& instance, const Theme& theme) {
+    // Collect the manifest's user-assignable slots (plugin-wide unique
+    // by the loader's validation; first zone wins the label).
+    struct SlotInfo {
+        const ntp::SampleZone* zone = nullptr;
+    };
+
+    std::vector<SlotInfo> slots;
+    for (const ntp::DspNode& node : instance.manifest().graph.nodes) {
+        for (const ntp::SampleZone& zone : node.zones) {
+            if (zone.user_assignable && !zone.slot_id.empty()) {
+                slots.push_back({.zone = &zone});
+            }
+        }
+    }
+    if (slots.empty()) {
+        return;
+    }
+
+    ImGui::SeparatorText("SAMPLE SLOTS");
+    const auto& overrides = instance.slot_overrides();
+    for (const SlotInfo& info : slots) {
+        const ntp::SampleZone& zone = *info.zone;
+        ImGui::PushID(zone.slot_id.c_str());
+        const std::string& label = zone.slot_label.empty() ? zone.slot_id : zone.slot_label;
+        // Current assignment: user file + short content hash, or the
+        // baked fallback.
+        const auto it = overrides.find(zone.slot_id);
+        if (it != overrides.end()) {
+            // "sha256:" + 8 hex chars is enough to eyeball identity.
+            const std::string short_hash =
+                it->second.hash.size() > 15 ? it->second.hash.substr(0, 15) : it->second.hash;
+            ImGui::Text("%s: %s", label.c_str(), it->second.name.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(theme.text_dim, "(%s)", short_hash.c_str());
+        } else {
+            ImGui::Text("%s:", label.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(theme.text_dim, "fallback: %s", zone.fallback_file.c_str());
+        }
+
+        SlotPickerState& state = slot_state_[workspace_id + "/" + zone.slot_id];
+        ImGui::SetNextItemWidth(220.0F);
+        ImGui::InputTextWithHint("##path", "path to wav/ogg/mp3", state.path.data(),
+                                 state.path.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("LOAD") && state.path[0] != '\0') {
+            state.status =
+                session.set_plugin_sample_override(workspace_id, zone.slot_id, state.path.data())
+                    ? ""
+                    : session.error();
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(it == overrides.end());
+        if (ImGui::SmallButton("CLEAR")) {
+            session.clear_plugin_sample_override(workspace_id, zone.slot_id);
+            state.status.clear();
+        }
+        ImGui::EndDisabled();
+        if (!state.status.empty()) {
+            ImGui::TextColored(theme.text_dim, "%s", state.status.c_str());
+        }
+        ImGui::PopID();
+    }
+}
+
 void NtpUi::draw(app::ProjectSession& session, const std::string& workspace_id,
                  const Theme& theme) {
     plugins::NtpInstance* instance = session.plugin_instance(workspace_id);
@@ -367,11 +435,13 @@ void NtpUi::draw(app::ProjectSession& session, const std::string& workspace_id,
             ImGui::TextDisabled("webview UI: showing parameter panel");
         }
         draw_auto_panel(*instance, manifest);
+        draw_slot_picker(session, workspace_id, *instance, theme);
         return;
     }
     for (const ntp::UiControl& control : manifest.ui.controls) {
         draw_control(*instance, manifest, *plugin, control, theme);
     }
+    draw_slot_picker(session, workspace_id, *instance, theme);
 }
 
 } // namespace nt::ui
