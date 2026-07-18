@@ -4,10 +4,27 @@
 // compatible); missing keys take defaults (backward compatible).
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace nt::io {
+
+// One remembered project for the PROJECTS window's recent list. The
+// count/name metadata is cached from the project at open/save time so
+// the list renders without touching disk; pinned entries sort first and
+// are never evicted.
+struct RecentProject {
+    std::string path;             // absolute project path
+    std::string name;             // cached display name (project.name)
+    int channels = 0;             // cached channel count
+    int patterns = 0;             // cached pattern count
+    std::int64_t last_opened = 0; // unix seconds; recency sort key
+    bool pinned = false;
+
+    bool operator==(const RecentProject&) const = default;
+};
 
 struct Settings {
     // Bumped only on incompatible layout changes; additions are free.
@@ -45,6 +62,16 @@ struct Settings {
     bool local_api_enabled = false;
     int local_api_port = 9311; // the web relay's conventional port
     std::string local_api_token;
+
+    // ── Asset browser (PROJECTS / LIBRARY windows) ───────────────────
+    // User library root directories the LIBRARY window browses for
+    // samples and NTP archives (no OS dialog in-tree — added by path).
+    std::vector<std::string> library_roots;
+    // Recent-projects MRU for the PROJECTS window; the view keeps it
+    // pinned-first then most-recent-first (ui/projects_view helpers).
+    std::vector<RecentProject> recent_projects;
+    // Favourited asset paths, surfaced in the LIBRARY favourites row.
+    std::vector<std::string> favourite_paths;
 };
 
 // Loads settings from `path`. A missing or unreadable file yields

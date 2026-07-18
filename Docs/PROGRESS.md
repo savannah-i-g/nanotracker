@@ -3,6 +3,35 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 28 closed — Project browser + asset manager
+
+- Landed: **PROJECTS window** (`ui/projects_view`) — a Settings-
+  persisted recent list ({path, name, channels, patterns,
+  last_opened, pinned}) recorded at user-driven open/save chokepoints
+  in main.cpp (NOT in save_ftrk, so autosave never spams it — spot-
+  verified), open-on-click through the shared load path, pin/unpin
+  (pinned first, never evicted; unpinned capped at 20), new-from-
+  template 4ch/8ch (new `new_project(int channels)` setter), greyed
+  missing entries with manual remove (drive-may-be-unmounted).
+  **LIBRARY window** (`ui/library_view`) — Settings-persisted roots
+  (path-field add/remove), a bounded cached recursive walk (depth 8,
+  4000-entry cap, rebuilt on rescan not per-frame), samples
+  auditioned via the Stage 25 `preview_file`, NTP archives installed
+  via `load_plugin_file`, a favourites section (persisted path set).
+  Both floating/default-hidden/VIEW-toggled. Presets scoped out
+  honestly (the bank stores per-plugin JSON keyed by plugin id, not
+  loose library files — no actionable verb; FIXES.md notes the scope
+  difference vs the web's browser). List logic extracted to inline
+  testable helpers.
+- Verification: 166/166 both trees (+9: settings round-trip of the
+  three new fields + tolerant/element-wise malformed-drop, recent
+  dedup/refresh/pin-preservation + unpinned eviction + missing-path
+  retention, classify_asset, toggle_favourite, template channel
+  count); recording-hook autosave-avoidance spot-verified; tidy/
+  format clean; screenshots (empty + populated PROJECTS, LIBRARY
+  listing over a seeded root, favourite toggle).
+- Backup: `NanoTracker_stage28_2026-07-18.tar.gz`; git tag `stage-28`.
+
 ## 2026-07-18 — Stage 27 closed — Real transient slicing + cue markers
 
 - Landed: **spectral-flux onset detector** (`audio/onset_detect`,

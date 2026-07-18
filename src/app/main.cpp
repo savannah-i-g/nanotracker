@@ -24,12 +24,14 @@
 #include "ui/fx_mixer_view.h"
 #include "ui/history_view.h"
 #include "ui/instrument_table_view.h"
+#include "ui/library_view.h"
 #include "ui/local_api_view.h"
 #include "ui/midi_view.h"
 #include "ui/module_view.h"
 #include "ui/note_entry_view.h"
 #include "ui/pattern_view.h"
 #include "ui/piano_roll_view.h"
+#include "ui/projects_view.h"
 #include "ui/sample_browser_view.h"
 #include "ui/sample_view.h"
 #include "ui/theme.h"
@@ -282,8 +284,10 @@ struct WindowVisibility {
     bool note_entry = true;
     bool midi = true;
     bool local_api = true;
-    bool history = false; // edit-history panel, floating, off by default
-    bool debug = false;   // diagnostics surface, off by default
+    bool history = false;  // edit-history panel, floating, off by default
+    bool projects = false; // recent-projects launcher, floating, off by default
+    bool library = false;  // asset browser, floating, off by default
+    bool debug = false;    // diagnostics surface, off by default
 };
 
 // The dock layout's top strip. Theme/CRT moved to the SETTINGS menu and
@@ -462,7 +466,8 @@ void capture_import_report(ShellState& shell, nt::app::ProjectSession& session) 
 void draw_module_choice_modal(const char* id, const char* path, nt::audio::AudioEngine& audio,
                               nt::app::ProjectSession& session,
                               nt::modplay::ModulePlayer& module_player,
-                              nt::ui::ModuleView& module_view, ShellState& shell) {
+                              nt::ui::ModuleView& module_view, ShellState& shell,
+                              nt::io::Settings& settings) {
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
                             ImVec2(0.5F, 0.5F));
     if (ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -475,6 +480,7 @@ void draw_module_choice_modal(const char* id, const char* path, nt::audio::Audio
                 std::fprintf(stderr, "import: %s\n", session.error().c_str());
             } else {
                 capture_import_report(shell, session);
+                nt::ui::ProjectsView::record(settings, session, path);
             }
             ImGui::CloseCurrentPopup();
         }
@@ -561,6 +567,8 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
                     want_save_dialog = true;
                 } else if (!session.save_ftrk(project_path.data())) {
                     std::fprintf(stderr, "save: %s\n", session.error().c_str());
+                } else {
+                    nt::ui::ProjectsView::record(settings, session, project_path.data());
                 }
             }
             if (ImGui::MenuItem("save as...")) {
@@ -601,6 +609,8 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             ImGui::MenuItem("MIDI", nullptr, &vis.midi);
             ImGui::MenuItem("LOCAL API", nullptr, &vis.local_api);
             ImGui::MenuItem("HISTORY", nullptr, &vis.history);
+            ImGui::MenuItem("PROJECTS", nullptr, &vis.projects);
+            ImGui::MenuItem("LIBRARY", nullptr, &vis.library);
             ImGui::MenuItem("EXPORT", nullptr, &shell.show_export);
             ImGui::MenuItem("DEBUG", nullptr, &vis.debug);
             ImGui::Separator();
@@ -694,6 +704,8 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             ImGui::OpenPopup("open module");
         } else if (!session.load_file(project_path.data())) {
             std::fprintf(stderr, "load: %s\n", session.error().c_str());
+        } else {
+            nt::ui::ProjectsView::record(settings, session, project_path.data());
         }
     }
     // import module... : always routes the importer, then reports.
@@ -702,13 +714,16 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             std::fprintf(stderr, "import: %s\n", session.error().c_str());
         } else {
             capture_import_report(shell, session);
+            nt::ui::ProjectsView::record(settings, session, import_path.data());
         }
     }
     draw_module_choice_modal("open module", module_pending.data(), audio, session, module_player,
-                             module_view, shell);
+                             module_view, shell, settings);
     if (draw_path_dialog("save project as", "save", project_path)) {
         if (!session.save_ftrk(project_path.data())) {
             std::fprintf(stderr, "save: %s\n", session.error().c_str());
+        } else {
+            nt::ui::ProjectsView::record(settings, session, project_path.data());
         }
     }
     return active;
@@ -886,6 +901,8 @@ int main(int argc, char** argv) {
         nt::ui::PianoRollView piano_roll_view;
         nt::ui::NoteEntryView note_entry_view;
         nt::ui::HistoryView history_view;
+        nt::ui::ProjectsView projects_view;
+        nt::ui::LibraryView library_view;
         nt::ui::ExportView export_view(nt::platform::config_dir() / "export_presets.json");
         nt::midi::MidiInput midi_input;
         nt::midi::MidiOutputPort midi_output;
@@ -925,6 +942,8 @@ int main(int argc, char** argv) {
         if (cli.load_path != nullptr) {
             if (!session.load_file(cli.load_path)) {
                 std::fprintf(stderr, "load: %s\n", session.error().c_str());
+            } else {
+                nt::ui::ProjectsView::record(settings, session, cli.load_path);
             }
             for (const std::string& warning : session.load_warnings()) {
                 std::fprintf(stderr, "load warning: %s\n", warning.c_str());
@@ -1059,6 +1078,7 @@ int main(int argc, char** argv) {
             if (!session.save_ftrk(cli.save_path)) {
                 std::fprintf(stderr, "save: %s\n", session.error().c_str());
             } else {
+                nt::ui::ProjectsView::record(settings, session, cli.save_path);
                 std::fprintf(stderr, "saved: %s\n", cli.save_path);
             }
         }
@@ -1205,6 +1225,14 @@ int main(int argc, char** argv) {
             }
             if (vis.history) {
                 history_view.draw(session, *theme, vis.history);
+            }
+            // Floating asset windows, default-hidden like HISTORY/DEBUG:
+            // launched from VIEW rather than docked into the DAW layout.
+            if (vis.projects) {
+                projects_view.draw(session, settings, *theme, vis.projects);
+            }
+            if (vis.library) {
+                library_view.draw(session, settings, *theme, vis.library);
             }
             export_view.draw(session, *theme, shell.show_export);
             if (clear_startup_focus) {

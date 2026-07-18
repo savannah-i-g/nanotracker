@@ -45,8 +45,12 @@ public:
     ProjectSession(ProjectSession&&) = delete;
     ProjectSession& operator=(ProjectSession&&) = delete;
 
-    // Replaces the open project with a fresh default one.
+    // Replaces the open project with a fresh empty one. new_project()
+    // is the 4-channel default the FILE menu uses; the overload sets the
+    // channel count (clamped 1..kMaxChannels) for the PROJECTS window's
+    // new-from-template shortcuts.
     void new_project();
+    void new_project(int channels);
 
     // Loads a project file by extension: .ftrk natively, .mod via the
     // importer (further formats join as their importers land). Returns

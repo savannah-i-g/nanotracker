@@ -37,8 +37,12 @@ ProjectSession::~ProjectSession() {
 }
 
 void ProjectSession::new_project() {
+    new_project(4);
+}
+
+void ProjectSession::new_project(int channels) {
     stop();
-    project_ = engine::create_project(4);
+    project_ = engine::create_project(std::clamp(channels, 1, engine::kMaxChannels));
     undo_.reset();     // fresh project: no history to have lost
     povr_raw_.clear(); // carried POVR belongs to the previous project
     povr_pending_.clear();

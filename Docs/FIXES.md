@@ -483,3 +483,20 @@ detail as each fix lands.
   the boundary. This removes the up-to-one-tick early read near row
   boundaries recorded at Stage 17; the change is snapshot-additive, so
   the golden RT render path is untouched.
+- **Asset browser scope (deliberate)** — the web exposed project and
+  asset management through browser file APIs and IndexedDB. Stage 28's
+  PROJECTS and LIBRARY windows (`ui/projects_view`, `ui/library_view`)
+  deliberately narrow this to the owner's scope guard: a browser over
+  real directories, no database and no tagging beyond favourites.
+  Concretely: (a) library roots are added by an in-app path field, not
+  an OS file picker — the whole native port avoids in-tree OS dialogs
+  (`ui/sample_browser_view` set the precedent); (b) the LIBRARY window
+  lists only what it can act on — samples (auditioned through the Stage
+  25 `preview_file` path) and NTP archives (installed via
+  `load_plugin_file`); (c) user presets are NOT browsed here — the
+  preset bank stores them per-plugin as JSON in the config directory
+  (`plugins/preset_bank`, the web's IndexedDB store) and they apply to a
+  live instance from the plugin panel, so a loose-file listing would
+  carry no actionable verb. The recursive listing is bounded (depth and
+  entry caps) and cached per root-set — never an unbounded synchronous
+  walk each frame.

@@ -38,6 +38,7 @@ add_executable(nt_tests
     export_suite_test.cpp
     export_presets_test.cpp
     local_api_test.cpp
+    settings_test.cpp
     ${CMAKE_SOURCE_DIR}/src/api/local_api.cpp
     ${CMAKE_SOURCE_DIR}/src/app/midi_record.cpp
     ${CMAKE_SOURCE_DIR}/src/app/pattern_ops.cpp
@@ -83,6 +84,7 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/io/export_post.cpp
     ${CMAKE_SOURCE_DIR}/src/io/export_presets.cpp
     ${CMAKE_SOURCE_DIR}/src/io/export_render.cpp
+    ${CMAKE_SOURCE_DIR}/src/io/settings.cpp
     ${CMAKE_SOURCE_DIR}/src/io/import/import_common.cpp
     ${CMAKE_SOURCE_DIR}/src/io/import/it_importer.cpp
     ${CMAKE_SOURCE_DIR}/src/io/import/mod_importer.cpp
@@ -90,8 +92,12 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/io/import/xm_importer.cpp
     ${CMAKE_SOURCE_DIR}/src/rt/rt_assert.cpp)
 
+# imgui headers only (no link): settings_test includes the PROJECTS /
+# LIBRARY view headers for their inline list/classify helpers, and
+# ui/theme.h pulls in <imgui.h>. The helpers reference no ImGui symbols,
+# so the test binary still links without the UI/GL stack.
 target_include_directories(nt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/include)
+    ${CMAKE_SOURCE_DIR}/include ${imgui_SOURCE_DIR})
 target_link_libraries(nt_tests PRIVATE Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json OpenAL::OpenAL dr_libs stb samplerate
     libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi ixwebsocket
