@@ -1,13 +1,16 @@
 // ui/crt_pass — the phosphor-CRT post-process. The whole UI renders
-// into an offscreen target; this pass composites it to the backbuffer
-// with scanlines, vignette, and a quarter-resolution glow blur.
-// Intensity is user-scalable because full-strength scanlines fight
-// text legibility.
+// into an offscreen target; this pass composites it to the backbuffer.
+// Two variants share one composite shader: the dark-theme phosphor look
+// (additive quarter-res glow bloom, scanline darkening, corner vignette)
+// and a light-theme look (no dark bloom halo — it would murk a bright
+// scene — just a faint primary-tinted scanline and a barely-there
+// vignette). Intensity is user-scalable because full-strength scanlines
+// fight text legibility.
 //
 // Frame protocol:
 //   pass.begin(fb_w, fb_h, r, g, b);   // binds+clears the scene target
 //   ... render ImGui ...
-//   pass.end(enabled, intensity);      // composites to the backbuffer
+//   pass.end(enabled, intensity, light, sr, sg, sb); // composites out
 #pragma once
 
 #include <array>
@@ -30,8 +33,11 @@ public:
 
     // Composites the scene to the default framebuffer. When disabled,
     // the scene is passed through untouched (still one draw — the UI
-    // has already rendered offscreen by this point).
-    void end(bool enabled, float intensity);
+    // has already rendered offscreen by this point). `light` selects the
+    // light-theme composite; (scanline_r/g/b) is the theme primary used
+    // as the light scanline tint (ignored on the dark path).
+    void end(bool enabled, float intensity, bool light, float scanline_r, float scanline_g,
+             float scanline_b);
 
 private:
     void ensure_targets(int width, int height);

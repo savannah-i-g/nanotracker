@@ -40,6 +40,18 @@ ImU32 col(const ImVec4& v, float alpha_scale = 1.0F) {
     return ImGui::GetColorU32(c);
 }
 
+// Glyph colour for a filled hue pill: the hue's own luminance decides, so
+// bright hues (lime/cyan/yellow) get a dark glyph and dark hues a light
+// one. Fixes near-white pill text over bright hues on light themes, where
+// the window background alone was the wrong contrast reference.
+ImU32 pill_text_color(ImU32 hue) {
+    const auto r = static_cast<float>(hue & 0xFFU);
+    const auto g = static_cast<float>((hue >> 8U) & 0xFFU);
+    const auto b = static_cast<float>((hue >> 16U) & 0xFFU);
+    const float luma = ((0.299F * r) + (0.587F * g) + (0.114F * b)) / 255.0F;
+    return luma > 0.55F ? IM_COL32(20, 20, 20, 255) : IM_COL32(240, 240, 240, 255);
+}
+
 // QWERTY → note offset, mirroring the web KEY_NOTE_MAP: lower row =
 // entry octave, upper row = octave above.
 struct NoteKey {
@@ -408,20 +420,129 @@ void PatternView::draw_order_list(app::ProjectSession& session,
                                   const audio::EngineSnapshot& snapshot, const Theme& theme) {
     engine::TrackerProject& project = session.project();
     ImGui::TextColored(theme.primary, "ORDER");
-    for (std::size_t i = 0; i < project.order_list.size(); ++i) {
-        const int pat = project.order_list[i];
-        const bool is_current =
-            snapshot.transport_playing && static_cast<int>(i) == snapshot.order_pos;
-        const bool is_edit = pat == edit_pattern_;
-        std::array<char, 32> label{};
-        std::snprintf(label.data(), label.size(), "%s%02zu PAT%02d", is_current ? ">" : " ", i,
-                      pat);
-        if (ImGui::Selectable(label.data(), is_edit)) {
-            edit_pattern_ = pat;
-            cursor_.row = 0;
-            scroll_row_ = 0;
-            selection_.active = false;
+    ImGui::SetItemTooltip(
+        "double-click an entry to play from it; right-click to delete its pattern");
+
+    const int order_count = static_cast<int>(project.order_list.size());
+    const int pattern_count = static_cast<int>(project.patterns.size());
+    order_sel_ = std::clamp(order_sel_, 0, std::max(0, order_count - 1));
+
+    // Scrollable list of order positions; the two control rows below need
+    // reserved height so they never scroll out of reach.
+    if (ImGui::BeginChild("orderrows", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 2.0F))) {
+        for (int i = 0; i < order_count; ++i) {
+            const int pat = project.order_list[static_cast<std::size_t>(i)];
+            const bool is_current = snapshot.transport_playing && i == snapshot.order_pos;
+            std::array<char, 32> label{};
+            std::snprintf(label.data(), label.size(), "%s%02d PAT%02d", is_current ? ">" : " ", i,
+                          pat);
+            ImGui::PushID(i);
+            if (ImGui::Selectable(label.data(), i == order_sel_,
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
+                order_sel_ = i;
+                cursor_.row = 0;
+                scroll_row_ = 0;
+                selection_.active = false;
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    session.play_from(i); // row/order-accurate "play from here"
+                }
+            }
+            // Right-click deletes the pattern this slot points at (removing
+            // it from the pool and remapping the order list) — the "−"
+            // button only unlinks the order position, keeping the pattern.
+            if (ImGui::BeginPopupContextItem()) {
+                std::array<char, 32> del{};
+                std::snprintf(del.data(), del.size(), "delete PAT%02d", pat);
+                ImGui::BeginDisabled(pattern_count <= 1);
+                if (ImGui::MenuItem(del.data())) {
+                    session.delete_pattern(pat);
+                }
+                ImGui::EndDisabled();
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
         }
+    }
+    ImGui::EndChild();
+
+    const int sel_pat =
+        order_count > 0 ? project.order_list[static_cast<std::size_t>(order_sel_)] : 0;
+
+    // Row 1 — add / remove / reorder the selected position.
+    if (ImGui::SmallButton("+")) {
+        ImGui::OpenPopup("order_add");
+    }
+    ImGui::SetItemTooltip("add an order entry after the selection");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(order_count <= 1);
+    if (ImGui::SmallButton("-")) {
+        session.order_remove(order_sel_);
+        order_sel_ = std::max(0, order_sel_ - 1);
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("remove the selected order entry");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(order_sel_ <= 0);
+    if (ImGui::SmallButton("^") && session.order_move(order_sel_, -1)) {
+        --order_sel_;
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("move the selected entry up");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(order_sel_ >= order_count - 1);
+    if (ImGui::SmallButton("v") && session.order_move(order_sel_, 1)) {
+        ++order_sel_;
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("move the selected entry down");
+
+    // Row 2 — repoint the selected slot at another pattern (web-parity
+    // modulo cycle through the existing patterns). A project always holds
+    // at least one pattern; the guarded divisor also keeps the analyzer
+    // happy under the disabled-at-zero button.
+    const int wrap = std::max(1, pattern_count);
+    ImGui::BeginDisabled(order_count == 0 || pattern_count == 0);
+    if (ImGui::SmallButton("<")) {
+        session.order_set(order_sel_, (sel_pat - 1 + wrap) % wrap);
+    }
+    ImGui::SetItemTooltip("point this slot at the previous pattern");
+    ImGui::SameLine();
+    ImGui::Text("PAT%02d", sel_pat);
+    ImGui::SameLine();
+    if (ImGui::SmallButton(">")) {
+        session.order_set(order_sel_, (sel_pat + 1) % wrap);
+    }
+    ImGui::SetItemTooltip("point this slot at the next pattern");
+    ImGui::EndDisabled();
+
+    // "+" popup: a fresh blank pattern (web handleOrderAdd), or re-use an
+    // existing pattern by inserting another reference to it.
+    if (ImGui::BeginPopup("order_add")) {
+        const auto select_new_position = [&] {
+            order_sel_ =
+                std::min(order_sel_ + 1, static_cast<int>(session.project().order_list.size()) - 1);
+        };
+        if (ImGui::MenuItem("new pattern")) {
+            session.order_insert(order_sel_ + 1, session.create_pattern());
+            select_new_position();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("insert existing:");
+        for (int p = 0; p < pattern_count; ++p) {
+            std::array<char, 16> plabel{};
+            std::snprintf(plabel.data(), plabel.size(), "PAT%02d", p);
+            if (ImGui::MenuItem(plabel.data())) {
+                session.order_insert(order_sel_ + 1, p);
+                select_new_position();
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // The grid follows the selected order slot's pattern (ignored while
+    // playing, when the view tracks the playhead pattern).
+    if (!project.order_list.empty()) {
+        edit_pattern_ = project.order_list[static_cast<std::size_t>(order_sel_)];
     }
 }
 
@@ -490,7 +611,7 @@ void PatternView::draw_grid(app::ProjectSession& session, const audio::EngineSna
                 std::snprintf(hex.data(), hex.size(), "%02X", bound[static_cast<std::size_t>(bi)]);
                 if (bi == 0) {
                     draw->AddRectFilled({px, py}, {px + pill_w, py + pill_h}, hue);
-                    draw->AddText({px + 2, py}, col(theme.background), hex.data());
+                    draw->AddText({px + 2, py}, pill_text_color(hue), hex.data());
                 } else {
                     draw->AddRect({px, py}, {px + pill_w, py + pill_h}, hue);
                     draw->AddText({px + 2, py}, hue, hex.data());
@@ -731,7 +852,7 @@ void PatternView::draw(app::ProjectSession& session, const audio::EngineSnapshot
         ImGui::Separator();
 
         const GridMetrics m = metrics();
-        if (ImGui::BeginChild("order", ImVec2(m.char_w * 14.0F, 0), ImGuiChildFlags_Borders)) {
+        if (ImGui::BeginChild("order", ImVec2(m.char_w * 18.0F, 0), ImGuiChildFlags_Borders)) {
             draw_order_list(session, snapshot, theme);
         }
         ImGui::EndChild();

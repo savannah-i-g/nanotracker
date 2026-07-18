@@ -59,7 +59,7 @@ public:
     // preview, and handles chip clicks / right-click delete / drag
     // drop. Failed connections append to `status` (fix #13).
     void draw(app::ProjectSession& session, const std::vector<JackAnchor>& anchors,
-              const io::Settings& settings, std::string& status);
+              const io::Settings& settings, bool light, std::string& status);
 
 private:
     void draw_one(ImDrawList* draw, const Rope& rope, ImU32 colour, float thickness, float dash_on,

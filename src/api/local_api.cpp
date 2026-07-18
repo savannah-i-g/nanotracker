@@ -468,28 +468,28 @@ bool parse_export_options(const json& cmd, io::ExportOptions& options, std::stri
 
 // ── Command classification ───────────────────────────────────────────
 
-// Web ops whose session surface does not exist natively yet (pattern
-// and order-list structure editing, channel-count reshape, seq layer
-// count management). Known names get a typed "unsupported" refusal —
-// distinct from invalidOp so scripts can tell "wrong name" from "not
-// here yet".
+// Web ops whose session surface still does not exist natively (per-row
+// insert/delete, pattern rename, channel-count reshape, seq layer count
+// management). Known names get a typed "unsupported" refusal — distinct
+// from invalidOp so scripts can tell "wrong name" from "not here yet".
 bool op_is_unsupported(const std::string& op) {
-    static constexpr std::array<const char*, 12> kUnsupported = {
-        "insertRow",     "deleteRow",     "resizePattern", "createPattern",
-        "deletePattern", "renamePattern", "setOrderList",  "insertOrderAt",
-        "removeOrderAt", "setChannels",   "addSeqLayer",   "removeSeqLayer",
+    static constexpr std::array<const char*, 6> kUnsupported = {
+        "insertRow", "deleteRow", "renamePattern", "setChannels", "addSeqLayer", "removeSeqLayer",
     };
     return std::any_of(kUnsupported.begin(), kUnsupported.end(),
                        [&op](const char* name) { return op == name; });
 }
 
 bool op_is_known(const std::string& op) {
-    static constexpr std::array<const char*, 33> kKnown = {
+    static constexpr std::array<const char*, 39> kKnown = {
         // Web-parity surface
         "setCell", "clearCell", "setNoteOff", "setRange", "setBpm", "setSpeed", "renameSample",
         "setSampleMeta", "setSampleStretchRatio", "conformSampleToRows", "setInstrumentSlot",
         "clearInstrumentSlot", "addSeqNote", "removeSeqNote", "updateSeqNote",
         "setSeqLayerInstrument", "setSeqLayerEnabled",
+        // Pattern / order-list structure (native session surface)
+        "createPattern", "deletePattern", "resizePattern", "setOrderList", "insertOrderAt",
+        "removeOrderAt",
         // Native additions
         "play", "stop", "newProject", "loadProject", "saveProject", "exportProject",
         "loadSampleFile", "loadSampleData", "clearSample", "addWorkspaceNode", "addPluginNode",
@@ -970,6 +970,71 @@ void validate_command(const json& cmd, int index, app::ProjectSession& session,
         }
         return;
     }
+    if (op == "createPattern") {
+        int rows = 0;
+        if (get_int(cmd, "rows", rows) && (rows < 1 || rows > 256)) {
+            errors.push_back(make_error(index, kErrInvalidField, "rows must be 1..256"));
+        }
+        return;
+    }
+    if (op == "deletePattern") {
+        if (require_pattern(cmd, index, project, errors) < 0) {
+            return;
+        }
+        if (project.patterns.size() <= 1) {
+            errors.push_back(make_error(index, kErrInvalidOp, "at least one pattern must remain"));
+        }
+        return;
+    }
+    if (op == "resizePattern") {
+        if (require_pattern(cmd, index, project, errors) < 0) {
+            return;
+        }
+        int rows = 0;
+        if (!get_int(cmd, "rows", rows) || rows < 1 || rows > 256) {
+            errors.push_back(make_error(index, kErrInvalidField, "rows must be 1..256"));
+        }
+        return;
+    }
+    if (op == "setOrderList") {
+        const auto it = cmd.find("orderList");
+        if (it == cmd.end() || !it->is_array() || it->empty()) {
+            errors.push_back(
+                make_error(index, kErrInvalidField, "orderList must be a non-empty array"));
+            return;
+        }
+        for (const auto& value : *it) {
+            if (!value.is_number_integer() || pattern_index_by_id(project, value.get<int>()) < 0) {
+                errors.push_back(make_error(index, kErrOutOfBounds,
+                                            "orderList entry references a missing pattern"));
+                return;
+            }
+        }
+        return;
+    }
+    if (op == "insertOrderAt") {
+        int position = 0;
+        if (!get_int(cmd, "index", position) || position < 0 ||
+            position > static_cast<int>(project.order_list.size())) {
+            errors.push_back(make_error(index, kErrOutOfBounds, "index out of range"));
+            return;
+        }
+        require_pattern(cmd, index, project, errors);
+        return;
+    }
+    if (op == "removeOrderAt") {
+        int position = 0;
+        if (!get_int(cmd, "index", position) || position < 0 ||
+            position >= static_cast<int>(project.order_list.size())) {
+            errors.push_back(make_error(index, kErrOutOfBounds, "index out of range"));
+            return;
+        }
+        if (project.order_list.size() <= 1) {
+            errors.push_back(
+                make_error(index, kErrInvalidOp, "at least one order entry must remain"));
+        }
+        return;
+    }
     if (op == "play" || op == "stop" || op == "newProject") {
         return; // no arguments
     }
@@ -1212,6 +1277,7 @@ void validate_command(const json& cmd, int index, app::ProjectSession& session,
 struct BatchExtras {
     json created_node_ids = json::array();
     json created_cable_ids = json::array();
+    json created_pattern_ids = json::array(); // createPattern results (web parity)
     json loaded_samples = json::array();
     json export_result; // null until an exportProject lands
 };
@@ -1470,6 +1536,69 @@ json apply_command(const json& cmd, int index, app::ProjectSession& session, Bat
         }
         return {};
     }
+    if (op == "createPattern") {
+        const int new_index = session.create_pattern();
+        const auto uindex = static_cast<std::size_t>(new_index);
+        std::string name;
+        if (get_string(cmd, "name", name) && uindex < project.patterns.size()) {
+            project.patterns[uindex].name = name; // display-only field
+        }
+        int rows = 0;
+        if (get_int(cmd, "rows", rows)) {
+            session.resize_pattern(new_index, rows);
+        }
+        extras.created_pattern_ids.push_back(new_index);
+        return {};
+    }
+    if (op == "deletePattern") {
+        int pattern_id = 0;
+        get_int(cmd, "patternId", pattern_id);
+        const int pattern_index = pattern_index_by_id(project, pattern_id);
+        if (pattern_index < 0 || !session.delete_pattern(pattern_index)) {
+            return make_error(index, kErrInvalidOp, session.error());
+        }
+        return {};
+    }
+    if (op == "resizePattern") {
+        int pattern_id = 0;
+        int rows = 0;
+        get_int(cmd, "patternId", pattern_id);
+        get_int(cmd, "rows", rows);
+        const int pattern_index = pattern_index_by_id(project, pattern_id);
+        if (pattern_index < 0 || !session.resize_pattern(pattern_index, rows)) {
+            return make_error(index, kErrInvalidOp, session.error());
+        }
+        return {};
+    }
+    if (op == "setOrderList") {
+        std::vector<int> order;
+        for (const auto& value : cmd.at("orderList")) {
+            order.push_back(pattern_index_by_id(project, value.get<int>()));
+        }
+        if (!session.set_order_list(std::move(order))) {
+            return make_error(index, kErrInvalidOp, session.error());
+        }
+        return {};
+    }
+    if (op == "insertOrderAt") {
+        int position = 0;
+        int pattern_id = 0;
+        get_int(cmd, "index", position);
+        get_int(cmd, "patternId", pattern_id);
+        const int pattern_index = pattern_index_by_id(project, pattern_id);
+        if (pattern_index < 0 || !session.order_insert(position, pattern_index)) {
+            return make_error(index, kErrInvalidOp, session.error());
+        }
+        return {};
+    }
+    if (op == "removeOrderAt") {
+        int position = 0;
+        get_int(cmd, "index", position);
+        if (!session.order_remove(position)) {
+            return make_error(index, kErrInvalidOp, session.error());
+        }
+        return {};
+    }
     if (op == "play") {
         session.play();
         return {};
@@ -1703,7 +1832,9 @@ json execute_batch(app::ProjectSession& session, const json& commands, const jso
         return result;
     }
 
-    json result{{"ok", true}, {"commandsApplied", applied}, {"createdPatternIds", json::array()}};
+    json result{{"ok", true},
+                {"commandsApplied", applied},
+                {"createdPatternIds", std::move(extras.created_pattern_ids)}};
     if (!extras.created_node_ids.empty()) {
         result["createdNodeIds"] = std::move(extras.created_node_ids);
     }
@@ -2054,6 +2185,23 @@ json build_schema() {
                {"patternId:int", "channel:int", "layerIndex:int", "instrument:int"}),
         op_doc("setSeqLayerEnabled", "Mute/unmute a sequence layer.",
                {"patternId:int", "channel:int", "layerIndex:int", "enabled:bool"}),
+        op_doc("createPattern",
+               "Append a blank pattern. Its id is returned in BatchResult.createdPatternIds.",
+               {"name?:string", "rows?:int(1..256, default project rows)"}),
+        op_doc("deletePattern",
+               "Delete a pattern; order-list references are remapped. At least one pattern must "
+               "remain.",
+               {"patternId:int"}),
+        op_doc("resizePattern",
+               "Set a pattern's row count (1..256). Growth pads empty rows; shrink trims rows and "
+               "clamps sequence notes.",
+               {"patternId:int", "rows:int"}),
+        op_doc("setOrderList", "Replace the whole order list (every id must exist).",
+               {"orderList:int[]"}),
+        op_doc("insertOrderAt", "Insert a pattern id into the order list at index.",
+               {"index:int", "patternId:int"}),
+        op_doc("removeOrderAt", "Remove the order entry at index. At least one entry must remain.",
+               {"index:int"}),
         op_doc("play", "Start the transport.", {}),
         op_doc("stop", "Stop the transport.", {}),
         op_doc("newProject", "Replace the open project with a fresh default one.", {}),
@@ -2107,8 +2255,9 @@ json build_schema() {
     notes.push_back("Every batch validates against pre-batch state; intra-batch references are "
                     "unsupported (web parity).");
     notes.push_back(
-        "Pattern/order-list structure ops (insertRow, createPattern, setOrderList, "
-        "setChannels, …) return code 'unsupported' until the session grows that surface.");
+        "Pattern add/delete/resize and order-list insert/remove/replace are supported; the "
+        "remaining structure ops (insertRow, deleteRow, renamePattern, setChannels, "
+        "addSeqLayer/removeSeqLayer) return code 'unsupported'.");
     notes.push_back("Sequence layers are preallocated: layerIndex 0..3 is always addressable; "
                     "addSeqLayer/removeSeqLayer return 'unsupported'.");
     notes.push_back("patternId is the persistent pattern id, not an order-list index.");

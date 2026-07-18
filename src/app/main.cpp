@@ -322,13 +322,23 @@ void draw_shell_window(nt::audio::AudioEngine& audio, nt::app::ProjectSession& s
             ImGui::TextDisabled("ord %d  pat %d  row %02d", snap.order_pos, snap.pattern_index,
                                 snap.row);
         }
-        // App identity + frame rate, right-aligned on the transport row.
-        std::array<char, 96> id_line{};
-        std::snprintf(id_line.data(), id_line.size(), "%s %s  %.1f fps", nt::kAppName,
-                      nt::kVersionString, static_cast<double>(ImGui::GetIO().Framerate));
-        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() -
-                                                             ImGui::CalcTextSize(id_line.data()).x -
-                                                             ImGui::GetStyle().WindowPadding.x));
+        // App version + frame rate, right-aligned. Kept off the transport
+        // controls' row whenever the window is too narrow to hold both, so
+        // a high UI scale never pushes the strip into a horizontal scroll
+        // (the app name lives in the window title + HELP, so drop it here).
+        std::array<char, 64> id_line{};
+        std::snprintf(id_line.data(), id_line.size(), "v%s  %.0f fps", nt::kVersionString,
+                      static_cast<double>(ImGui::GetIO().Framerate));
+        // Anchor to the content region (excludes padding and any scrollbar)
+        // so the right edge never slides under a scrollbar and clips.
+        const float id_region_min = ImGui::GetWindowContentRegionMin().x;
+        const float id_region_max = ImGui::GetWindowContentRegionMax().x;
+        const float id_right_x = id_region_max - ImGui::CalcTextSize(id_line.data()).x;
+        if (id_right_x > ImGui::GetCursorPosX() + ImGui::GetStyle().ItemSpacing.x) {
+            ImGui::SameLine(id_right_x);
+        } else {
+            ImGui::SetCursorPosX(std::max(id_region_min, id_right_x));
+        }
         ImGui::TextDisabled("%s", id_line.data());
 
         // ── Engine status row + meters ───────────────────────────────
@@ -578,15 +588,15 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
         if (ImGui::BeginMenu("VIEW")) {
             ImGui::MenuItem("nanoTracker shell", nullptr, &vis.shell);
             ImGui::MenuItem("PATTERN", nullptr, &vis.pattern);
-            ImGui::MenuItem("piano roll", nullptr, &vis.piano_roll);
-            ImGui::MenuItem("workspace", nullptr, &vis.workspace);
+            ImGui::MenuItem("PIANO ROLL", nullptr, &vis.piano_roll);
+            ImGui::MenuItem("WORKSPACE", nullptr, &vis.workspace);
             ImGui::MenuItem("FX MIXER", nullptr, &vis.fx_mixer);
             ImGui::MenuItem("MODULE PLAYER", nullptr, &vis.module);
             ImGui::MenuItem("SAMPLES", nullptr, &vis.samples);
             ImGui::MenuItem("INSTRUMENTS", nullptr, &vis.instruments);
             ImGui::MenuItem("SAMPLE BROWSER", nullptr, &vis.sample_browser);
             ImGui::MenuItem("NOTE ENTRY", nullptr, &vis.note_entry);
-            ImGui::MenuItem("midi", nullptr, &vis.midi);
+            ImGui::MenuItem("MIDI", nullptr, &vis.midi);
             ImGui::MenuItem("LOCAL API", nullptr, &vis.local_api);
             ImGui::MenuItem("EXPORT", nullptr, &shell.show_export);
             ImGui::MenuItem("DEBUG", nullptr, &vis.debug);
@@ -632,19 +642,14 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
                 }
                 ImGui::EndMenu();
             }
-            // The CRT shader's bloom/scanline/vignette constants assume a
-            // dark scene, so the pass is gated off on light themes
-            // (crt.end) and its controls disabled here.
-            ImGui::BeginDisabled(active->light);
+            // The CRT pass has a light-theme variant (crt.end): a faint
+            // primary-tinted scanline in place of the dark phosphor bloom,
+            // so the toggle is live on every theme now.
             ImGui::MenuItem("CRT effect", nullptr, &settings.crt_enabled);
             ImGui::BeginDisabled(!settings.crt_enabled);
             ImGui::SetNextItemWidth(140.0F);
             ImGui::SliderFloat("intensity", &settings.crt_intensity, 0.0F, 1.0F, "%.2f");
             ImGui::EndDisabled();
-            ImGui::EndDisabled();
-            if (active->light) {
-                ImGui::TextDisabled("CRT unavailable on light themes");
-            }
             ImGui::Separator();
             if (audio.running()) {
                 ImGui::TextDisabled("%s @ %u Hz", audio.device().backend_name(),
@@ -720,15 +725,15 @@ void build_dock_layout(ImGuiID dockspace_id) {
     ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->WorkSize);
 
     // Each ratio is of the node being split: strip heights come off
-    // first, then the rail takes 0.24 of what remains beside the
-    // centre.
+    // first, then the rail takes 0.28 of what remains beside the centre
+    // (wide enough for the MIDI / LOCAL API content without clipping).
     ImGuiID center = dockspace_id;
     ImGuiID top = 0;
     ImGuiID bottom = 0;
     ImGuiID right = 0;
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.14F, &top, &center);
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.26F, &bottom, &center);
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.24F, &right, &center);
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28F, &right, &center);
 
     // A lone transport strip needs no tab bar.
     if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(top)) {
@@ -737,15 +742,15 @@ void build_dock_layout(ImGuiID dockspace_id) {
 
     ImGui::DockBuilderDockWindow("nanoTracker shell", top);
     ImGui::DockBuilderDockWindow("PATTERN", center);
-    ImGui::DockBuilderDockWindow("piano roll", center);
-    ImGui::DockBuilderDockWindow("workspace", center);
+    ImGui::DockBuilderDockWindow("PIANO ROLL", center);
+    ImGui::DockBuilderDockWindow("WORKSPACE", center);
     ImGui::DockBuilderDockWindow("FX MIXER", center);
     ImGui::DockBuilderDockWindow("MODULE PLAYER", center);
     ImGui::DockBuilderDockWindow("SAMPLES", bottom);
     ImGui::DockBuilderDockWindow("INSTRUMENTS", bottom);
     ImGui::DockBuilderDockWindow("SAMPLE BROWSER", bottom);
     ImGui::DockBuilderDockWindow("NOTE ENTRY", bottom);
-    ImGui::DockBuilderDockWindow("midi", right);
+    ImGui::DockBuilderDockWindow("MIDI", right);
     ImGui::DockBuilderDockWindow("LOCAL API", right);
     ImGui::DockBuilderDockWindow("EXPORT", right);
     ImGui::DockBuilderFinish(dockspace_id);
@@ -1126,7 +1131,7 @@ int main(int argc, char** argv) {
             if (dock_focus_countdown > 0) {
                 --dock_focus_countdown;
                 if (dock_focus_countdown == 2) {
-                    ImGui::SetWindowFocus("midi");
+                    ImGui::SetWindowFocus("MIDI");
                 } else if (dock_focus_countdown == 1) {
                     ImGui::SetWindowFocus("SAMPLES");
                 } else if (dock_focus_countdown == 0) {
@@ -1178,10 +1183,10 @@ int main(int argc, char** argv) {
             if (vis.piano_roll) {
                 piano_roll_view.draw(session, settings, *theme);
             }
-            // The midi window's draw owns the device-ring drain
-            // (ui/midi_view.h), so hiding it also pauses device MIDI
-            // intake until re-shown; bus events (midi_record.update)
-            // are unaffected.
+            // Device MIDI intake runs every frame regardless of window
+            // visibility — the drain is hoisted out of the view so hiding
+            // the midi window never stalls the device ring.
+            midi_view.drain_input(session);
             if (vis.midi) {
                 midi_view.draw(session, *theme);
             }
@@ -1205,7 +1210,8 @@ int main(int argc, char** argv) {
             session.sweep_retired();
             nt::platform::ImGuiHost::end_frame();
 
-            crt.end(settings.crt_enabled && !theme->light, settings.crt_intensity);
+            crt.end(settings.crt_enabled, settings.crt_intensity, theme->light, theme->primary.x,
+                    theme->primary.y, theme->primary.z);
             if (std::string shot_path; script.take_screenshot(shot_path)) {
                 write_framebuffer_ppm(shot_path.c_str(), fb_w, fb_h);
             }

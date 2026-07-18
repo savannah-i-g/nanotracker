@@ -368,7 +368,7 @@ TEST_CASE("local api rejects bogus ids with typed errors", "[local_api]") {
     }
 
     SECTION("known-but-unsupported web op") {
-        const json& err = first_error(lb.execute(json::array({{{"op", "createPattern"}}})));
+        const json& err = first_error(lb.execute(json::array({{{"op", "renamePattern"}}})));
         CHECK(err.at("code").get<std::string>() == "unsupported");
     }
 
@@ -635,6 +635,78 @@ TEST_CASE("local api project load and export", "[local_api]") {
 
     fs::remove(ftrk_path);
     fs::remove(wav_path);
+}
+
+TEST_CASE("local api pattern and order-list structure ops", "[local_api]") {
+    Loopback lb;
+    lb.authenticate();
+
+    const auto pattern_count = [&]() {
+        return lb.read(json{{"op", "getProjectSummary"}}).at("data").at("patternCount").get<int>();
+    };
+    const auto order_list = [&]() {
+        return lb.read(json{{"op", "getOrderList"}}).at("data").get<std::vector<int>>();
+    };
+
+    REQUIRE(pattern_count() == 1);
+    REQUIRE(order_list() == std::vector<int>{0});
+
+    SECTION("createPattern returns the new id and honours a custom row count") {
+        const json r = lb.execute(json::array({{{"op", "createPattern"}, {"rows", 32}}}));
+        REQUIRE(r.at("ok").get<bool>());
+        CHECK(r.at("createdPatternIds") == json::array({1}));
+        CHECK(pattern_count() == 2);
+        const json pat = lb.read(json{{"op", "getPattern"}, {"patternId", 1}});
+        CHECK(pat.at("data").at("rows").size() == 32);
+    }
+
+    SECTION("insert / setOrderList / remove round-trip") {
+        REQUIRE(lb.execute(json::array({{{"op", "createPattern"}}})).at("ok").get<bool>()); // id 1
+        REQUIRE(lb.execute(json::array({{{"op", "insertOrderAt"}, {"index", 1}, {"patternId", 1}}}))
+                    .at("ok")
+                    .get<bool>());
+        CHECK(order_list() == std::vector<int>{0, 1});
+        REQUIRE(lb.execute(json::array({{{"op", "setOrderList"}, {"orderList", {1, 0, 1}}}}))
+                    .at("ok")
+                    .get<bool>());
+        CHECK(order_list() == std::vector<int>{1, 0, 1});
+        REQUIRE(lb.execute(json::array({{{"op", "removeOrderAt"}, {"index", 0}}}))
+                    .at("ok")
+                    .get<bool>());
+        CHECK(order_list() == std::vector<int>{0, 1});
+    }
+
+    SECTION("deletePattern remaps the order list") {
+        lb.execute(json::array({{{"op", "createPattern"}}})); // id 1
+        lb.execute(json::array({{{"op", "createPattern"}}})); // id 2
+        lb.execute(json::array({{{"op", "setOrderList"}, {"orderList", {0, 1, 2, 1}}}}));
+        REQUIRE(lb.execute(json::array({{{"op", "deletePattern"}, {"patternId", 1}}}))
+                    .at("ok")
+                    .get<bool>());
+        CHECK(pattern_count() == 2);
+        CHECK(order_list() == std::vector<int>{0, 1});
+    }
+
+    SECTION("refusals return typed errors") {
+        CHECK(first_error(lb.execute(json::array({{{"op", "deletePattern"}, {"patternId", 0}}})))
+                  .at("code")
+                  .get<std::string>() == "invalidOp"); // last pattern
+        CHECK(first_error(lb.execute(json::array({{{"op", "removeOrderAt"}, {"index", 0}}})))
+                  .at("code")
+                  .get<std::string>() == "invalidOp"); // last order entry
+        CHECK(first_error(lb.execute(json::array(
+                              {{{"op", "insertOrderAt"}, {"index", 0}, {"patternId", 99}}})))
+                  .at("code")
+                  .get<std::string>() == "notFound");
+        CHECK(
+            first_error(lb.execute(json::array({{{"op", "setOrderList"}, {"orderList", {0, 5}}}})))
+                .at("code")
+                .get<std::string>() == "outOfBounds");
+        CHECK(first_error(lb.execute(json::array(
+                              {{{"op", "resizePattern"}, {"patternId", 0}, {"rows", 999}}})))
+                  .at("code")
+                  .get<std::string>() == "invalidField");
+    }
 }
 
 TEST_CASE("local api schema discovery", "[local_api]") {

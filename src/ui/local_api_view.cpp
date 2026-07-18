@@ -69,7 +69,7 @@ void LocalApiView::draw(api::LocalApiServer& server, io::Settings& settings, con
         settings.local_api_enabled = enabled;
         apply_enabled(server, settings);
     }
-    ImGui::SameLine();
+    // Caption on its own line: on SameLine it overflowed the docked rail.
     ImGui::TextDisabled("localhost WebSocket, bearer-token auth");
 
     ImGui::BeginDisabled(server.running());
@@ -86,9 +86,11 @@ void LocalApiView::draw(api::LocalApiServer& server, io::Settings& settings, con
 
     std::array<char, 64> token_buf{};
     std::snprintf(token_buf.data(), token_buf.size(), "%s", settings.local_api_token.c_str());
-    ImGui::SetNextItemWidth(260.0F);
-    ImGui::InputText("token", token_buf.data(), token_buf.size(), ImGuiInputTextFlags_ReadOnly);
-    ImGui::SameLine();
+    // Full-width field on its own line (a right-side label plus the token
+    // hex overflowed the rail); the copy/regenerate row sits beneath it.
+    ImGui::TextDisabled("token (bearer)");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::InputText("##token", token_buf.data(), token_buf.size(), ImGuiInputTextFlags_ReadOnly);
     if (ImGui::SmallButton("copy")) {
         ImGui::SetClipboardText(settings.local_api_token.c_str());
     }

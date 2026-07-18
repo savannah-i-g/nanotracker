@@ -88,6 +88,10 @@ public:
 
     // Transport.
     void play();
+    // Start the transport at a given order-list position — the row/order-
+    // accurate start the pattern order list uses ("play from here").
+    // play() is play_from(0); the position is clamped to the list.
+    void play_from(int order_pos);
     void stop();
     [[nodiscard]] bool playing() const;
 
@@ -103,6 +107,27 @@ public:
     // Preview a note on a channel outside the sequencer (step-entry
     // audition). Resolves the sample the same way playback would.
     void preview_note(int channel, int slot, int note);
+
+    // ── Pattern & order-list structure ───────────────────────────────
+    // All structural: the transport stops and the bundle republishes,
+    // because the audio thread reads patterns / order_list / seq_patterns
+    // / fx_patterns through the bundle. Container reshapes do not fit the
+    // per-cell undo model, so these clear the undo stack — the same
+    // discipline the sequence edits use. Refusals set error() + return
+    // false.
+    //
+    // The engine indexes patterns (and the parallel seq/fx arrays) by the
+    // order-list value directly, so pattern id must equal array index;
+    // delete_pattern reindexes all four arrays together to keep that
+    // invariant (the web deletePattern left id gaps — see FIXES.md).
+    int create_pattern();                     // append a blank pattern; returns its index
+    bool delete_pattern(int index);           // refuse the last; order refs remapped
+    bool resize_pattern(int index, int rows); // 1..256; pad / truncate, clamp seq notes
+    bool order_insert(int position, int pattern_index);
+    bool order_remove(int position);                 // refuse emptying the list
+    bool order_move(int position, int direction);    // -1 up / +1 down
+    bool order_set(int position, int pattern_index); // repoint one slot
+    bool set_order_list(std::vector<int> order);     // replace; every ref must be valid
 
     // Sample slot management. Loading/clearing are structural: the
     // transport stops and the bundle republishes. Returns false with

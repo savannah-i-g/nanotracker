@@ -365,6 +365,187 @@ void ProjectSession::publish_bundle() {
     live_runner_ = std::move(runner);
 }
 
+int ProjectSession::create_pattern() {
+    stop();
+    const int index = static_cast<int>(project_.patterns.size());
+    // Blank pattern at the project's default row count / channel width,
+    // id == index (engine::create_pattern names it PATnn). The parallel
+    // seq/fx arrays grow lazily on first use and the engine guards their
+    // bounds, so an append never leaves a stale entry attached.
+    project_.patterns.push_back(
+        engine::create_pattern(index, project_.rows_per_pattern, project_.channels));
+    undo_.clear();
+    publish_bundle();
+    return index;
+}
+
+bool ProjectSession::delete_pattern(int index) {
+    if (index < 0 || index >= static_cast<int>(project_.patterns.size())) {
+        error_ = "delete pattern: index out of range";
+        return false;
+    }
+    if (project_.patterns.size() <= 1) {
+        error_ = "cannot delete the last pattern";
+        return false;
+    }
+    stop();
+    const auto uindex = static_cast<std::size_t>(index);
+    project_.patterns.erase(project_.patterns.begin() + index);
+    // Keep the per-pattern parallel arrays aligned by index. They may be
+    // shorter than patterns (grown lazily), so only erase a live entry.
+    auto& seq = project_.sequence_mixer.seq_patterns;
+    if (uindex < seq.size()) {
+        seq.erase(seq.begin() + index);
+    }
+    auto& fx = project_.fx_mixer.fx_patterns;
+    if (uindex < fx.size()) {
+        fx.erase(fx.begin() + index);
+    }
+    // Reindex remaining patterns so id == array index still holds (the
+    // engine indexes patterns/seq/fx by the order-list value directly).
+    for (int i = index; i < static_cast<int>(project_.patterns.size()); ++i) {
+        project_.patterns[static_cast<std::size_t>(i)].id = i;
+    }
+    // Remap the order list: drop references to the removed pattern, shift
+    // references above it down one. Never leave the list empty (mirrors
+    // the web's safeOrder fallback), so playback always has a pattern.
+    std::vector<int> remapped;
+    remapped.reserve(project_.order_list.size());
+    for (const int pat : project_.order_list) {
+        if (pat == index) {
+            continue;
+        }
+        remapped.push_back(pat > index ? pat - 1 : pat);
+    }
+    if (remapped.empty()) {
+        remapped.push_back(0);
+    }
+    project_.order_list = std::move(remapped);
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::resize_pattern(int index, int rows) {
+    if (index < 0 || index >= static_cast<int>(project_.patterns.size())) {
+        error_ = "resize pattern: index out of range";
+        return false;
+    }
+    rows = std::clamp(rows, 1, 256);
+    stop();
+    const auto uindex = static_cast<std::size_t>(index);
+    engine::TrackerPattern& pattern = project_.patterns[uindex];
+    // Grow pads empty cells at the bottom; shrink truncates.
+    pattern.rows.resize(
+        static_cast<std::size_t>(rows),
+        std::vector<engine::TrackerCell>(static_cast<std::size_t>(std::max(1, project_.channels))));
+    // FX automation is one optional cell per row (parallel to rows).
+    auto& fx = project_.fx_mixer.fx_patterns;
+    if (uindex < fx.size()) {
+        fx[uindex].present.resize(static_cast<std::size_t>(rows), false);
+        fx[uindex].cells.resize(static_cast<std::size_t>(rows));
+    }
+    // Sequence notes are tick-addressed; a shrink clamps them into the
+    // new length (drop notes that start past the end, trim overhang).
+    auto& seq = project_.sequence_mixer.seq_patterns;
+    if (uindex < seq.size()) {
+        const int max_tick = rows * std::max(1, project_.speed);
+        for (auto& channel : seq[uindex].layers) {
+            for (engine::SequenceLayer& layer : channel) {
+                std::erase_if(layer.notes, [max_tick](const engine::SequenceNote& n) {
+                    return n.start_tick >= max_tick;
+                });
+                for (engine::SequenceNote& n : layer.notes) {
+                    n.duration_ticks =
+                        std::max(1, std::min(n.duration_ticks, max_tick - n.start_tick));
+                }
+            }
+        }
+    }
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::order_insert(int position, int pattern_index) {
+    if (pattern_index < 0 || pattern_index >= static_cast<int>(project_.patterns.size())) {
+        error_ = "order insert: pattern out of range";
+        return false;
+    }
+    position = std::clamp(position, 0, static_cast<int>(project_.order_list.size()));
+    stop();
+    project_.order_list.insert(project_.order_list.begin() + position, pattern_index);
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::order_remove(int position) {
+    if (position < 0 || position >= static_cast<int>(project_.order_list.size())) {
+        error_ = "order remove: position out of range";
+        return false;
+    }
+    if (project_.order_list.size() <= 1) {
+        error_ = "cannot remove the last order entry";
+        return false;
+    }
+    stop();
+    project_.order_list.erase(project_.order_list.begin() + position);
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::order_move(int position, int direction) {
+    const int count = static_cast<int>(project_.order_list.size());
+    const int target = position + direction;
+    if (position < 0 || position >= count || target < 0 || target >= count) {
+        error_ = "order move: out of range";
+        return false;
+    }
+    stop();
+    std::swap(project_.order_list[static_cast<std::size_t>(position)],
+              project_.order_list[static_cast<std::size_t>(target)]);
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::order_set(int position, int pattern_index) {
+    if (position < 0 || position >= static_cast<int>(project_.order_list.size())) {
+        error_ = "order set: position out of range";
+        return false;
+    }
+    if (pattern_index < 0 || pattern_index >= static_cast<int>(project_.patterns.size())) {
+        error_ = "order set: pattern out of range";
+        return false;
+    }
+    stop();
+    project_.order_list[static_cast<std::size_t>(position)] = pattern_index;
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
+bool ProjectSession::set_order_list(std::vector<int> order) {
+    if (order.empty()) {
+        error_ = "order list cannot be empty";
+        return false;
+    }
+    const int pattern_count = static_cast<int>(project_.patterns.size());
+    for (const int pat : order) {
+        if (pat < 0 || pat >= pattern_count) {
+            error_ = "order list references pattern " + std::to_string(pat) + " out of range";
+            return false;
+        }
+    }
+    stop();
+    project_.order_list = std::move(order);
+    undo_.clear();
+    publish_bundle();
+    return true;
+}
+
 void ProjectSession::rebuild_workspace_nodes() {
     workspace_ = graph::WorkspaceGraph{};
     workspace_dormant_ = graph::DormantEntries{};
@@ -1280,6 +1461,11 @@ void ProjectSession::play() {
                  .value = 0.0F,
                  .sample = nullptr,
                  .bundle = nullptr});
+}
+
+void ProjectSession::play_from(int order_pos) {
+    // kTransportPlay seeds order_pos from aux_int (engine clamps it).
+    audio_.send({.type = audio::Command::Type::kTransportPlay, .aux_int = std::max(0, order_pos)});
 }
 
 void ProjectSession::stop() {

@@ -22,6 +22,11 @@ void FxMixerView::draw(app::ProjectSession& session, const Theme& theme) {
                            "structural edits stop the transport and rebuild the rack");
         ImGui::Separator();
 
+        if (strips.empty()) {
+            ImGui::TextColored(theme.text_dim,
+                               "no FX channels — add one for delay / filter / reverb sends");
+        }
+
         for (int ci = 0; ci < static_cast<int>(strips.size()); ++ci) {
             engine::FxChannelStrip& strip = strips[static_cast<std::size_t>(ci)];
             ImGui::PushID(ci);

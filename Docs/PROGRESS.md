@@ -3,6 +3,36 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 24 closed — DAW polish sweep + pattern/order editing; 1.1.0
+
+- Landed (owner priority): **pattern/order-list structure editing
+  end to end** — session ops (create/delete/resize pattern with
+  four-array reindexing and order remap; order insert/remove/move/
+  set; every one structural stop→mutate→publish), ORDER column UI
+  (+ popup, −, ↑/↓, modulo repoint, double-click play-from-here via
+  the new `play_from(order_pos)`, right-click delete-pattern), six
+  Local API ops flipped unsupported→real with schema update.
+  Per-pattern row counts are real in the native model, so resize is
+  genuine (1-256). FIXES.md: native deletePattern reindexes rather
+  than leaving the web's id gaps. **Punch list** (13 fixed / 2
+  reasoned-left, `Plan_Refinement/01-punch-list.md`): the
+  hidden-midi-window device-input stall (real bug — drain hoisted
+  out of the view), light-aware CRT scanline (dark path
+  byte-identical), luminance-based pill text + darkened cable
+  palette on light, loop-region visibility, shell/LOCAL-API
+  clipping at 1.5×, right-rail width, tooltips, empty-state hints,
+  title casing (one-time re-dock for old layouts, noted in
+  FIXES.md). Left: sub-tick record remainder (precision-only, no
+  drift reports), session preview-file API (backend refactor,
+  recorded). **Version 1.1.0** released with the refinement cycle.
+- Verification: 138/138 both trees (+5: session pattern ops incl.
+  live-engine structural safety, Local API loopback for the flipped
+  ops); tidy/format clean (a real printf-literal bug caught en
+  route); screenshot evidence across Arctic+Amber at 1.0×/1.5×
+  under the harness; CI green both platforms.
+- Backup: `NanoTracker_stage24_2026-07-18.tar.gz`; git tags
+  `stage-24` + `v1.1.0`.
+
 ## 2026-07-18 — IT compressed samples fixed + live BPM (owner-driven)
 
 - Landed: the IT importer chose the 2.14-vs-2.15 decompression

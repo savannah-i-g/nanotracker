@@ -31,7 +31,18 @@ struct CableStyle {
     float dash_off;
 };
 
-CableStyle style_for(graph::PortKind kind, graph::CableMode mode) {
+// Scale a colour's rgb toward black. The identity cable hues are bright
+// (authored for a dark canvas); on a light theme they read as low-
+// contrast washes, so they are darkened for legibility (the one place
+// the palette is not kept verbatim).
+ImU32 darken(ImU32 c, float f) {
+    const auto r = static_cast<int>(static_cast<float>(c & 0xFFU) * f);
+    const auto g = static_cast<int>(static_cast<float>((c >> 8U) & 0xFFU) * f);
+    const auto b = static_cast<int>(static_cast<float>((c >> 16U) & 0xFFU) * f);
+    return IM_COL32(r, g, b, (c >> 24U) & 0xFFU);
+}
+
+CableStyle style_for(graph::PortKind kind, graph::CableMode mode, bool light) {
     ImU32 colour = mode == graph::CableMode::kReroute ? kRerouteColour : kTapColour;
     float dash_on = 0.0F;
     float dash_off = 0.0F;
@@ -55,7 +66,8 @@ CableStyle style_for(graph::PortKind kind, graph::CableMode mode) {
         }
         break;
     }
-    return {.colour = colour, .dash_on = dash_on, .dash_off = dash_off};
+    return {
+        .colour = light ? darken(colour, 0.55F) : colour, .dash_on = dash_on, .dash_off = dash_off};
 }
 
 } // namespace
@@ -267,7 +279,7 @@ void CableOverlay::begin_drag(const JackAnchor& source) {
 }
 
 void CableOverlay::draw(app::ProjectSession& session, const std::vector<JackAnchor>& anchors,
-                        const io::Settings& settings, std::string& status) {
+                        const io::Settings& settings, bool light, std::string& status) {
     ImDrawList* draw = ImGui::GetForegroundDrawList();
     const float dt = std::min(ImGui::GetIO().DeltaTime, 1.0F / 30.0F);
     const graph::WorkspaceGraph& graph = session.workspace();
@@ -307,7 +319,7 @@ void CableOverlay::draw(app::ProjectSession& session, const std::vector<JackAnch
         Rope& rope = it->second;
         step_rope(rope, dt, a->pos, b->pos, settings);
 
-        const CableStyle style = style_for(cable.src_kind, cable.mode);
+        const CableStyle style = style_for(cable.src_kind, cable.mode, light);
         draw_one(draw, rope, style.colour, settings.cable_thickness, style.dash_on, style.dash_off);
 
         // Delayed-feedback marking is subtle by design: cables whose
@@ -362,7 +374,8 @@ void CableOverlay::draw(app::ProjectSession& session, const std::vector<JackAnch
         preview_valid_ = true;
     }
     step_rope(preview_, dt, from, mouse, settings);
-    draw_one(draw, preview_, kPreviewColour, settings.cable_thickness, 6.0F, 4.0F);
+    draw_one(draw, preview_, light ? darken(kPreviewColour, 0.55F) : kPreviewColour,
+             settings.cable_thickness, 6.0F, 4.0F);
 
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         dragging_ = false;

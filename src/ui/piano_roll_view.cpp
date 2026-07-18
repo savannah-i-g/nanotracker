@@ -145,16 +145,19 @@ void PianoRollView::draw_toolbox(app::ProjectSession& session, int pattern_index
             return engine::transpose(in, -12);
         };
     }
+    ImGui::SetItemTooltip("transpose down an octave");
     ImGui::SameLine();
     if (ImGui::SmallButton("+7")) {
         tool = [](const std::vector<engine::SequenceNote>& in) { return engine::transpose(in, 7); };
     }
+    ImGui::SetItemTooltip("transpose up a perfect fifth");
     ImGui::SameLine();
     if (ImGui::SmallButton("+12")) {
         tool = [](const std::vector<engine::SequenceNote>& in) {
             return engine::transpose(in, 12);
         };
     }
+    ImGui::SetItemTooltip("transpose up an octave");
     ImGui::SameLine();
     if (ImGui::SmallButton("rev")) {
         tool = [](const std::vector<engine::SequenceNote>& in) { return engine::reverse(in); };
@@ -172,12 +175,16 @@ void PianoRollView::draw_toolbox(app::ProjectSession& session, int pattern_index
     ImGui::Combo("##arpdir", &arp_direction_, "up\0down\0up/down\0random\0");
     ImGui::SameLine();
     ImGui::RadioButton("r4", &arp_rate_, 4);
+    ImGui::SetItemTooltip("arp rate: 4 steps per row");
     ImGui::SameLine();
     ImGui::RadioButton("r8", &arp_rate_, 8);
+    ImGui::SetItemTooltip("arp rate: 8 steps per row");
     ImGui::SameLine();
     ImGui::RadioButton("o1", &arp_octaves_, 1);
+    ImGui::SetItemTooltip("arp range: 1 octave");
     ImGui::SameLine();
     ImGui::RadioButton("o2", &arp_octaves_, 2);
+    ImGui::SetItemTooltip("arp range: 2 octaves");
     ImGui::SameLine();
     if (ImGui::SmallButton("arp")) {
         const auto direction = static_cast<engine::ArpDirection>(arp_direction_);
@@ -209,12 +216,14 @@ void PianoRollView::draw_toolbox(app::ProjectSession& session, int pattern_index
             return engine::gate_length(in, 50);
         };
     }
+    ImGui::SetItemTooltip("gate length 50%%");
     ImGui::SameLine();
     if (ImGui::SmallButton("g75")) {
         tool = [](const std::vector<engine::SequenceNote>& in) {
             return engine::gate_length(in, 75);
         };
     }
+    ImGui::SetItemTooltip("gate length 75%%");
     ImGui::SameLine();
     if (ImGui::SmallButton("g100")) {
         tool = [](const std::vector<engine::SequenceNote>& in) {
@@ -271,9 +280,10 @@ void PianoRollView::draw_toolbar(app::ProjectSession& session, io::Settings& set
     if (ImGui::SmallButton("play from start")) {
         session.play();
     }
-    // The session exposes only a from-the-top transport start (order 0);
-    // row-accurate "play from here" is not wired for the piano roll yet.
-    ImGui::SetItemTooltip("start the transport (F5 in the grid also toggles)");
+    // The piano roll spans the whole song timeline with no per-order
+    // cursor, so it starts from the top; the pattern ORDER list is the
+    // order-accurate home for play_from (double-click an entry).
+    ImGui::SetItemTooltip("start the transport from order 0 (F5 in the grid also toggles)");
 
     // ── Layer selector: note presence + "+ layer" ────────────────────
     const auto select_layer = [this](int target) {
@@ -349,7 +359,7 @@ void PianoRollView::draw_toolbar(app::ProjectSession& session, io::Settings& set
 void PianoRollView::draw(app::ProjectSession& session, io::Settings& settings, const Theme& theme) {
     ImGui::SetNextWindowPos(ImVec2{60, 60}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2{720, 620}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("piano roll")) {
+    if (!ImGui::Begin("PIANO ROLL")) {
         ImGui::End();
         return;
     }

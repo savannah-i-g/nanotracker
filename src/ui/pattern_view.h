@@ -112,6 +112,7 @@ private:
     int last_note_ = 0;       // most recent note written, for the panel readout
     int selected_slot_ = 1;
     int edit_pattern_ = 0; // pattern being edited (order-list selection)
+    int order_sel_ = 0;    // selected ORDER position (structural-edit target)
     int visible_rows_ = 20;
     // Pattern the cursor writes to this frame (edit_pattern_, or the
     // playhead pattern while playing) and its row count — cached by

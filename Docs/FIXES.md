@@ -296,13 +296,30 @@ detail as each fix lands.
   animations per sprite control (named frame lists, fps default 10,
   loop flag) with strict collected validation; chain() and tint are
   not ported (no consumer in the web corpus; ntp-convert unchanged).
-- **CRT pass gated off on light themes** (the shader's bright-pass/
-  scanline/vignette constants assume a dark scene): SETTINGS items
-  disable with an explanation on Arctic Light rather than rendering
-  wrong; a light-aware scanline is the recorded polish-sweep
-  candidate. Dark-theme rendering is pixel-identical (interactive
-  alphas and the toward-black scalings became background-relative
-  mixes that reduce to the old values on near-black palettes).
+- **Light-theme legibility polish** (native-only contrast fixes over the
+  web's dark-canvas assumptions): the pattern channel pill drew its hex in
+  the window background colour, so bright hues (lime/cyan/yellow) rendered
+  near-white text on light themes — now the glyph colour follows the
+  hue's own luminance (`pattern_view.cpp` `pill_text_color`), fixing every
+  theme. The sample-view loop region filled with `primary_glow` (0.08
+  alpha on Arctic), invisible over the waveform — a firmer light-theme
+  fill alpha now marks it (dark themes keep `primary_glow` exactly). The
+  cable palette (`cable_overlay.cpp`, previously "identity, kept
+  verbatim") darkens its bright hues by 0.55 on light themes so
+  reroute/preview/cv/midi cables are not light-on-light.
+- **CRT pass has a light-theme variant** (the shader's bright-pass/
+  scanline/vignette constants assume a dark scene): originally gated off
+  on light themes with an explanation. The polish sweep implemented the
+  recorded light variant — `crt_pass.cpp`'s composite shader branches on
+  a `u_light` uniform: the light path skips the additive glow bloom
+  entirely (it only washes out a bright scene), tints the darker scanline
+  phase toward the theme primary (`u_scanline`, the web's
+  `rgba(51,136,170,0.02)` scaled up for legibility) and keeps a faint
+  vignette; the glow chain is skipped outright on light themes. The
+  SETTINGS toggle is now live on every theme. Dark-theme rendering is
+  byte-for-byte unchanged (the light branch is a separate shader path;
+  interactive alphas and the toward-black scalings still reduce to the
+  old values on near-black palettes).
 - **IT compressed samples: 2.14 vs 2.15 variant is per-sample, not
   per-file** (`itImporter.ts` and the first native cut both keyed the
   IT2.15 double-delta integrator off the file header `cmwt >= 0x0215`,
@@ -336,6 +353,45 @@ detail as each fix lands.
   than averaging a mis-indexed interleave. No stereo/compressed sample
   exists in the owner corpus to fixture, so this path is verified by
   construction and the uncompressed-delta path by the fixture's slot 4.
+- **Window titles are uniformly upper-case** (native-only consistency):
+  the WORKSPACE / PIANO ROLL / MIDI windows were lower-case while every
+  other DAW window was upper-case. Normalized across the Begin() titles,
+  the VIEW menu, the dock builder and the focus calls. A config saved by
+  an older build docks those three windows by their old ids, so the first
+  launch after this change leaves them floating until VIEW → reset layout
+  (one-time; fresh configs are unaffected).
+- **deletePattern reindexes instead of leaving id gaps** (the web
+  programmatic `deletePattern`, `trackerLocalApi.ts:408-413`, filtered
+  `patterns` and `orderList` by `id !== patternId` and left the remaining
+  ids un-renumbered, so `id !== array index` afterward — which the
+  playback engine reads by direct array subscript
+  (`trackerEngine.ts:478,528`), silently breaking every later pattern
+  lookup). The native engine has the same index==id contract
+  (`tracker_engine.cpp` `pattern_by_id`, and `seq_patterns`/`fx_patterns`
+  indexed by the order-list value), so `ProjectSession::delete_pattern`
+  reindexes `patterns`, the parallel `seq_patterns`/`fx_patterns`, and the
+  `order_list` together: refs to the removed pattern drop, higher refs
+  shift down one, and remaining ids renumber to their new index. The
+  "never empty the order list" fallback matches the web's `safeOrder`.
+- **order_remove refuses emptying rather than blanking the pattern** (the
+  web `handleOrderRemove`, `Tracker.tsx:2107-2119`, on the last order
+  entry did NOT remove it — it cleared the referenced pattern to a fresh
+  blank and returned): the native `order_remove` simply refuses (returns
+  false, `error()` set) when one entry remains, keeping "remove" a pure
+  structural op. Clearing a pattern is a separate concern.
+- **Pattern add/delete/resize + order-list edits exist natively** (the
+  web UI could only ever append patterns — no delete/reorder affordance —
+  and structure editing lived in the programmatic local API): the native
+  session grows `create_pattern` / `delete_pattern` / `resize_pattern`
+  (1..256 rows, web-parity pad/truncate + sequence-note clamp) and
+  `order_insert` / `order_remove` / `order_move` / `order_set` /
+  `set_order_list`, surfaced in the PATTERN window's ORDER column
+  (+ / − / ↑ / ↓ and a modulo repoint cycle, matching the web renderer's
+  order controls and `handlePatternChange`). All are structural
+  (stop + republish) and clear undo, the same discipline the sequence
+  edits use. The six matching Local API ops (createPattern, deletePattern,
+  resizePattern, insertOrderAt, removeOrderAt, setOrderList) move from
+  `unsupported` to real with typed-error validation.
 - **Live song tempo is editable** (there was no way to change BPM/speed
   from the UI — the transport only displayed them): the transport bar
   now hosts BPM (20-255) and SPD (1-31) drag/type fields;

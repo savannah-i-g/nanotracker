@@ -1,9 +1,7 @@
 // ui/midi_view — MIDI control surface: input/output device pickers,
 // the 24 PPQN clock toggle, the inbound-note input mode (off | preview
 // | enter | record, applied by app/midi_record), MIDI-learn arming and
-// the mapping list. Owns the device-ring drain: called once per frame,
-// it forwards note events to the record controller and CCs through the
-// learn/mapping store. Precedence: while learn is armed the device is
+// the mapping list. Precedence: while learn is armed the device is
 // being wiggled to bind, so note events are dropped — they must not
 // preview or write pattern cells until the arm resolves.
 #pragma once
@@ -24,8 +22,13 @@ public:
 
     void draw(app::ProjectSession& session, const Theme& theme);
 
-private:
+    // Device-ring drain: forwards note events to the record controller
+    // and CCs to the learn/mapping store. Called unconditionally once per
+    // frame from the main loop — independent of this window's visibility,
+    // so hiding the midi window never pauses device intake.
     void drain_input(app::ProjectSession& session);
+
+private:
     void draw_input_mode(app::ProjectSession& session, const Theme& theme);
 
     // App-owned devices/threads/controllers the view renders for;

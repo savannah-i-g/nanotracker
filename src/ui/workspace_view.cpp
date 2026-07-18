@@ -244,7 +244,7 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
 bool WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settings& settings,
                                         const Theme& theme) {
     ImGui::SetNextWindowSize(ImVec2{300, 0}, ImGuiCond_FirstUseEver);
-    const bool visible = ImGui::Begin("workspace");
+    const bool visible = ImGui::Begin("WORKSPACE");
     if (visible) {
         if (ImGui::Button("add SUM node")) {
             session.add_sum_node();
@@ -369,7 +369,7 @@ void WorkspaceView::draw(app::ProjectSession& session, io::Settings& settings, c
 
     if (patchbay_visible) {
         std::string message;
-        overlay_.draw(session, anchors_, settings, message);
+        overlay_.draw(session, anchors_, settings, theme.light, message);
         if (!message.empty()) {
             status_ = message;
             status_ttl_ = 4.0F;

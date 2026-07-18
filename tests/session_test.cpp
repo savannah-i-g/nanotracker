@@ -6,10 +6,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -112,4 +114,186 @@ TEST_CASE("session sample slots and instrument table", "[session]") {
     }
 
     std::filesystem::remove(wav_path);
+}
+
+TEST_CASE("session pattern create/delete keeps id==index and remaps the order list",
+          "[session][pattern]") {
+    nt::audio::AudioEngine audio; // not started — device-independent
+    nt::app::ProjectSession session(audio);
+
+    // Fresh project: one pattern (id 0), order [0].
+    REQUIRE(session.project().patterns.size() == 1);
+    REQUIRE(session.project().order_list == std::vector<int>{0});
+
+    SECTION("create appends a blank pattern with id == index") {
+        const int a = session.create_pattern();
+        const int b = session.create_pattern();
+        CHECK(a == 1);
+        CHECK(b == 2);
+        const auto& proj = session.project();
+        REQUIRE(proj.patterns.size() == 3);
+        CHECK(proj.patterns[1].id == 1);
+        CHECK(proj.patterns[2].id == 2);
+        // Blank at the project default row count and channel width.
+        CHECK(static_cast<int>(proj.patterns[2].rows.size()) == proj.rows_per_pattern);
+        CHECK(proj.patterns[2].rows[0].size() == static_cast<std::size_t>(proj.channels));
+        CHECK(proj.order_list == std::vector<int>{0}); // create never touches order
+    }
+
+    SECTION("delete removes refs and shifts higher refs down (index==id preserved)") {
+        session.create_pattern(); // 1
+        session.create_pattern(); // 2
+        session.order_insert(1, 1);
+        session.order_insert(2, 2);
+        session.order_insert(3, 1);
+        REQUIRE(session.project().order_list == std::vector<int>{0, 1, 2, 1});
+
+        REQUIRE(session.delete_pattern(1));
+        const auto& proj = session.project();
+        REQUIRE(proj.patterns.size() == 2);
+        CHECK(proj.patterns[0].id == 0);
+        CHECK(proj.patterns[1].id == 1); // old pattern 2 renumbered to 1
+        // refs to 1 dropped, refs to 2 decremented to 1.
+        CHECK(proj.order_list == std::vector<int>{0, 1});
+    }
+
+    SECTION("deleting the last remaining pattern is refused") {
+        CHECK_FALSE(session.delete_pattern(0));
+        CHECK(session.project().patterns.size() == 1);
+    }
+
+    SECTION("delete that empties the order list re-seeds it") {
+        session.create_pattern(); // 1
+        REQUIRE(session.set_order_list({1, 1}));
+        REQUIRE(session.delete_pattern(1)); // every ref pointed at 1
+        // patterns=[0]; order must never be empty.
+        CHECK(session.project().patterns.size() == 1);
+        CHECK_FALSE(session.project().order_list.empty());
+        CHECK(session.project().order_list.front() == 0);
+    }
+}
+
+TEST_CASE("session order-list edits and refusals", "[session][pattern]") {
+    nt::audio::AudioEngine audio;
+    nt::app::ProjectSession session(audio);
+    session.create_pattern(); // 1
+    session.create_pattern(); // 2
+
+    SECTION("insert / move / repoint") {
+        REQUIRE(session.order_insert(1, 1));
+        REQUIRE(session.order_insert(2, 2));
+        CHECK(session.project().order_list == std::vector<int>{0, 1, 2});
+        REQUIRE(session.order_move(0, 1)); // swap 0 and 1
+        CHECK(session.project().order_list == std::vector<int>{1, 0, 2});
+        REQUIRE(session.order_set(0, 2));
+        CHECK(session.project().order_list == std::vector<int>{2, 0, 2});
+    }
+
+    SECTION("remove refuses to empty the list") {
+        REQUIRE(session.order_insert(1, 1));
+        REQUIRE(session.order_remove(1));
+        CHECK(session.project().order_list == std::vector<int>{0});
+        CHECK_FALSE(session.order_remove(0)); // last entry
+        CHECK(session.project().order_list == std::vector<int>{0});
+    }
+
+    SECTION("out-of-range and invalid refs are refused") {
+        CHECK_FALSE(session.order_insert(0, 99));    // pattern out of range
+        CHECK_FALSE(session.order_move(0, -1));      // off the top
+        CHECK_FALSE(session.order_set(5, 0));        // position out of range
+        CHECK_FALSE(session.set_order_list({}));     // empty
+        CHECK_FALSE(session.set_order_list({0, 7})); // ref out of range
+        CHECK(session.project().order_list == std::vector<int>{0});
+    }
+
+    SECTION("set_order_list replaces the whole list") {
+        REQUIRE(session.set_order_list({2, 1, 0, 1}));
+        CHECK(session.project().order_list == std::vector<int>{2, 1, 0, 1});
+    }
+}
+
+TEST_CASE("session resize_pattern pads, truncates and clamps sequence notes",
+          "[session][pattern]") {
+    nt::audio::AudioEngine audio;
+    nt::app::ProjectSession session(audio);
+    const int speed = session.project().speed;
+
+    SECTION("grow pads empty rows, shrink truncates, bounds clamp to 1..256") {
+        REQUIRE(session.resize_pattern(0, 32));
+        CHECK(session.project().patterns[0].rows.size() == 32);
+        REQUIRE(session.resize_pattern(0, 128));
+        CHECK(session.project().patterns[0].rows.size() == 128);
+        REQUIRE(session.resize_pattern(0, 0)); // clamps to 1
+        CHECK(session.project().patterns[0].rows.size() == 1);
+        REQUIRE(session.resize_pattern(0, 9999)); // clamps to 256
+        CHECK(session.project().patterns[0].rows.size() == 256);
+    }
+
+    SECTION("shrink drops notes past the end and trims overhang") {
+        REQUIRE(session.resize_pattern(0, 64));
+        session.seq_add_note(
+            0, 0, 0,
+            {.pitch = 60, .start_tick = 8 * speed, .duration_ticks = 40 * speed, .velocity = 100});
+        session.seq_add_note(
+            0, 0, 0,
+            {.pitch = 62, .start_tick = 40 * speed, .duration_ticks = speed, .velocity = 100});
+        REQUIRE(session.resize_pattern(0, 16)); // max_tick = 16*speed
+        const auto* layer = session.seq_layer(0, 0, 0, false);
+        REQUIRE(layer != nullptr);
+        REQUIRE(layer->notes.size() == 1); // the row-40 note is gone
+        CHECK(layer->notes[0].pitch == 60);
+        // overhang trimmed so start+duration <= 16*speed.
+        CHECK(layer->notes[0].start_tick + layer->notes[0].duration_ticks <= 16 * speed);
+    }
+}
+
+TEST_CASE("pattern/order structural edits stay consistent under a live engine",
+          "[session][pattern][reclaim]") {
+    nt::audio::AudioEngine audio;
+    if (!audio.start()) {
+        WARN("no audio device: " << audio.device().error());
+        return;
+    }
+    nt::app::ProjectSession session(audio);
+    for (int i = 0; i < 3; ++i) {
+        session.create_pattern(); // patterns 0..3
+    }
+    session.order_insert(1, 1);
+    session.order_insert(2, 2);
+    session.order_insert(3, 3);
+    session.play();
+
+    // Mutate the pattern set and order list while a real audio thread
+    // renders them through the bundle. A stale index or a freed pattern
+    // vector would crash or trip ASan; each op stops + republishes, so we
+    // re-arm the transport to keep it rolling across the edits.
+    for (int i = 0; i < 30; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (i == 5) {
+            session.create_pattern();
+        } else if (i == 10) {
+            session.delete_pattern(1);
+        } else if (i == 15) {
+            session.order_move(0, 1);
+        } else if (i == 20) {
+            session.order_remove(0);
+        } else if (i == 25) {
+            session.resize_pattern(0, 48);
+        }
+        session.play();
+        session.sweep_retired();
+    }
+
+    const auto& proj = session.project();
+    for (const int pat : proj.order_list) {
+        CHECK(pat >= 0);
+        CHECK(pat < static_cast<int>(proj.patterns.size()));
+    }
+    for (int i = 0; i < static_cast<int>(proj.patterns.size()); ++i) {
+        CHECK(proj.patterns[static_cast<std::size_t>(i)].id == i);
+    }
+    CHECK_FALSE(proj.order_list.empty());
+
+    session.stop();
+    audio.stop();
 }

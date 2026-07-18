@@ -69,21 +69,28 @@ uniform sampler2D u_scene;
 uniform sampler2D u_glow;
 uniform vec2 u_resolution;
 uniform float u_intensity;
+uniform float u_light;         // 1.0 selects the light-theme variant
+uniform vec3 u_scanline;       // theme primary, the light scanline tint
 void main() {
     vec3 scene = texture(u_scene, v_uv).rgb;
-    vec3 glow = texture(u_glow, v_uv).rgb;
-
-    vec3 color = scene + glow * (0.7 * u_intensity);
-
-    // Scanlines: darken alternate physical lines, softened by intensity.
     float line = 0.5 + 0.5 * cos(v_uv.y * u_resolution.y * 3.14159265);
-    color *= mix(1.0, 0.82 + 0.18 * line, u_intensity);
-
-    // Corner vignette.
     float dist = length(v_uv - 0.5) * 1.3;
-    color *= 1.0 - 0.35 * u_intensity * smoothstep(0.55, 1.0, dist);
 
-    frag = vec4(color, 1.0);
+    if (u_light > 0.5) {
+        // Light scene: additive bloom and heavy scanline darkening blow
+        // it out / murk it, so tint the darker scanline phase toward the
+        // theme primary (a whisper — the theme's rgba(.,.,.,0.02) scaled
+        // up for legibility) and keep only a hint of vignette.
+        vec3 color = mix(scene, u_scanline, (1.0 - line) * 0.06 * u_intensity);
+        color *= 1.0 - 0.10 * u_intensity * smoothstep(0.65, 1.0, dist);
+        frag = vec4(color, 1.0);
+    } else {
+        vec3 glow = texture(u_glow, v_uv).rgb;
+        vec3 color = scene + glow * (0.7 * u_intensity);
+        color *= mix(1.0, 0.82 + 0.18 * line, u_intensity);
+        color *= 1.0 - 0.35 * u_intensity * smoothstep(0.55, 1.0, dist);
+        frag = vec4(color, 1.0);
+    }
 })";
 
 unsigned compile_shader(GLenum type, const char* source) {
@@ -201,38 +208,45 @@ void CrtPass::begin(int width, int height, float clear_r, float clear_g, float c
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
-void CrtPass::end(bool enabled, float intensity) {
+void CrtPass::end(bool enabled, float intensity, bool light, float scanline_r, float scanline_g,
+                  float scanline_b) {
     glBindVertexArray(vao_);
     glDisable(GL_BLEND);
     glActiveTexture(GL_TEXTURE0);
 
     if (enabled && intensity > 0.0F) {
-        const int gw = width_ / kGlowDivisor > 0 ? width_ / kGlowDivisor : 1;
-        const int gh = height_ / kGlowDivisor > 0 ? height_ / kGlowDivisor : 1;
+        // The glow chain is a dark-theme phosphor effect; on a light scene
+        // the additive bloom only washes it out, so skip it entirely.
+        if (!light) {
+            const int gw = width_ / kGlowDivisor > 0 ? width_ / kGlowDivisor : 1;
+            const int gh = height_ / kGlowDivisor > 0 ? height_ / kGlowDivisor : 1;
 
-        // Bright-pass downsample into the glow chain.
-        glBindFramebuffer(GL_FRAMEBUFFER, glow_fbo_[0]);
-        glViewport(0, 0, gw, gh);
-        glUseProgram(prog_downsample_);
-        glUniform1i(glGetUniformLocation(prog_downsample_, "u_scene"), 0);
-        glUniform2f(glGetUniformLocation(prog_downsample_, "u_texel"),
-                    1.0F / static_cast<float>(width_), 1.0F / static_cast<float>(height_));
-        glBindTexture(GL_TEXTURE_2D, scene_tex_);
-        draw_fullscreen();
+            // Bright-pass downsample into the glow chain.
+            glBindFramebuffer(GL_FRAMEBUFFER, glow_fbo_[0]);
+            glViewport(0, 0, gw, gh);
+            glUseProgram(prog_downsample_);
+            glUniform1i(glGetUniformLocation(prog_downsample_, "u_scene"), 0);
+            glUniform2f(glGetUniformLocation(prog_downsample_, "u_texel"),
+                        1.0F / static_cast<float>(width_), 1.0F / static_cast<float>(height_));
+            glBindTexture(GL_TEXTURE_2D, scene_tex_);
+            draw_fullscreen();
 
-        // Separable blur: horizontal then vertical.
-        glUseProgram(prog_blur_);
-        glUniform1i(glGetUniformLocation(prog_blur_, "u_src"), 0);
+            // Separable blur: horizontal then vertical.
+            glUseProgram(prog_blur_);
+            glUniform1i(glGetUniformLocation(prog_blur_, "u_src"), 0);
 
-        glBindFramebuffer(GL_FRAMEBUFFER, glow_fbo_[1]);
-        glUniform2f(glGetUniformLocation(prog_blur_, "u_dir"), 1.0F / static_cast<float>(gw), 0.0F);
-        glBindTexture(GL_TEXTURE_2D, glow_tex_[0]);
-        draw_fullscreen();
+            glBindFramebuffer(GL_FRAMEBUFFER, glow_fbo_[1]);
+            glUniform2f(glGetUniformLocation(prog_blur_, "u_dir"), 1.0F / static_cast<float>(gw),
+                        0.0F);
+            glBindTexture(GL_TEXTURE_2D, glow_tex_[0]);
+            draw_fullscreen();
 
-        glBindFramebuffer(GL_FRAMEBUFFER, glow_fbo_[0]);
-        glUniform2f(glGetUniformLocation(prog_blur_, "u_dir"), 0.0F, 1.0F / static_cast<float>(gh));
-        glBindTexture(GL_TEXTURE_2D, glow_tex_[1]);
-        draw_fullscreen();
+            glBindFramebuffer(GL_FRAMEBUFFER, glow_fbo_[0]);
+            glUniform2f(glGetUniformLocation(prog_blur_, "u_dir"), 0.0F,
+                        1.0F / static_cast<float>(gh));
+            glBindTexture(GL_TEXTURE_2D, glow_tex_[1]);
+            draw_fullscreen();
+        }
 
         // Composite to the backbuffer.
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -243,6 +257,9 @@ void CrtPass::end(bool enabled, float intensity) {
         glUniform2f(glGetUniformLocation(prog_composite_, "u_resolution"),
                     static_cast<float>(width_), static_cast<float>(height_));
         glUniform1f(glGetUniformLocation(prog_composite_, "u_intensity"), intensity);
+        glUniform1f(glGetUniformLocation(prog_composite_, "u_light"), light ? 1.0F : 0.0F);
+        glUniform3f(glGetUniformLocation(prog_composite_, "u_scanline"), scanline_r, scanline_g,
+                    scanline_b);
         glBindTexture(GL_TEXTURE_2D, scene_tex_);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, glow_tex_[0]);

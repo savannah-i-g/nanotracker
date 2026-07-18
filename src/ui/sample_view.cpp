@@ -427,8 +427,13 @@ void SampleView::draw_waveform(app::ProjectSession& session, const Theme& theme)
             if (loop_begin < view_start + view_len && loop_end > view_start) {
                 const float lx = frame_to_px(loop_begin);
                 const float rx = frame_to_px(loop_end);
+                // The dark-theme glow (0.08 on light) is invisible over a
+                // bright waveform pane; a light theme needs a firmer fill.
+                // Dark themes keep primary_glow exactly (same rgb+alpha).
+                ImVec4 loop_fill = theme.primary;
+                loop_fill.w = theme.light ? 0.22F : theme.primary_glow.w;
                 draw->AddRectFilled({lx, origin.y}, {rx, origin.y + height},
-                                    ImGui::GetColorU32(theme.primary_glow));
+                                    ImGui::GetColorU32(loop_fill));
                 draw->AddLine({lx, origin.y}, {lx, origin.y + height},
                               ImGui::GetColorU32(theme.primary));
                 draw->AddLine({rx, origin.y}, {rx, origin.y + height},

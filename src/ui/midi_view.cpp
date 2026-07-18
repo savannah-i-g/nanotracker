@@ -112,11 +112,11 @@ void MidiView::draw_input_mode(app::ProjectSession& session, const Theme& theme)
 }
 
 void MidiView::draw(app::ProjectSession& session, const Theme& theme) {
-    drain_input(session);
-
+    // Note: device intake is drained unconditionally from the main loop
+    // (drain_input), not here — hiding this window must not pause it.
     ImGui::SetNextWindowPos(ImVec2{820, 60}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2{360, 0}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("midi")) {
+    if (!ImGui::Begin("MIDI")) {
         ImGui::End();
         return;
     }
