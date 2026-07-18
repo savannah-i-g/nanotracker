@@ -116,3 +116,27 @@ detail as each fix lands.
   nothrow new with our `free()` — an alloc/dealloc mismatch flagged by
   ASan and a gap in the RT-thread check. All standard variants now
   route through one malloc/free path (`rt/rt_assert.cpp`).
+- **Gate-length legato is pitch-blind-fixed** (`sequenceMidiTools.ts:
+  199-217` extended each note only to the next note of the *same*
+  pitch, stretching held notes across intervening pitches and leaving
+  cross-pitch gaps unfilled): native `engine/sequence_ops.cpp`
+  gate_length at ≥100% extends to the next later-starting note of any
+  pitch (chord-mates share one gap); final notes fall back to plain
+  scaling.
+- **Transform results keep selection order** (web
+  `applyVelocityCurve`/`adjustGate` returned notes re-sorted by start
+  tick, breaking index correspondence with the caller's selection):
+  native sequence transforms compute by time rank but return input
+  order; the applier re-sorts once at republish.
+- **Deterministic humanize/arp randomness** (web used bare
+  `Math.random()` — irreproducible): native transforms take a
+  caller-seeded `std::mt19937` and derive values from its
+  standard-specified raw output, so a seed reproduces identically on
+  every platform (pinned by exact-value tests in
+  `tests/sequence_ops_test.cpp`).
+- **New (native-only): pattern block operations** — the web clipboard
+  is single-cell (`TrackerCanvas.tsx:510-524`); the native grid adds
+  block selection, field-masked copy/cut/paste with edge clipping,
+  transpose, and FT2-style effect-param interpolation (same command
+  required at both endpoints, command copied onto filled rows), per
+  the stage spec's exceed-the-thinness clause (`app/pattern_ops.cpp`).

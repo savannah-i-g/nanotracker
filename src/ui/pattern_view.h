@@ -7,6 +7,7 @@
 // F5/F8 transport, Delete clears by field, space/= note-off).
 #pragma once
 
+#include "app/pattern_ops.h"
 #include "app/project_session.h"
 #include "audio/audio_engine.h"
 #include "ui/theme.h"
@@ -26,8 +27,23 @@ private:
         int field = 0; // 0=note 1=inst 2=vol 3=effect 4=param
     };
 
+    // Block-selection anchor in cursor coordinates; the cursor itself
+    // is the moving corner. Inactive means cursor-only editing, and
+    // every block operation then acts on the cursor cell as a 1×1
+    // selection.
+    struct Anchor {
+        int row = 0;
+        int channel = 0;
+        int field = 0; // cursor field units, see Cursor
+        bool active = false;
+    };
+
     void handle_keys(app::ProjectSession& session, const engine::TrackerPattern& pattern,
                      int pattern_index, int visible_rows);
+    // The active selection as a pattern_ops block (unnormalized — the
+    // ops normalize), or the cursor cell when no selection is active.
+    [[nodiscard]] app::CellSelection block_selection(int pattern_index) const;
+    void draw_context_menu(app::ProjectSession& session, int pattern_index);
     void draw_transport(app::ProjectSession& session, const audio::EngineSnapshot& snapshot,
                         const Theme& theme) const;
     void draw_order_list(app::ProjectSession& session, const audio::EngineSnapshot& snapshot,
@@ -38,6 +54,8 @@ private:
     void clamp_scroll(int rows, int visible_rows);
 
     Cursor cursor_;
+    Anchor selection_;
+    app::CellClipboard clipboard_;
     int scroll_row_ = 0;
     int channel_scroll_ = 0;
     int octave_ = 4;

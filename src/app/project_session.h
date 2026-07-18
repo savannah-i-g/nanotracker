@@ -173,6 +173,11 @@ public:
     // Layer-instrument changes are scalar writes and stay live.
     void seq_add_note(int pattern_index, int channel, int layer, const engine::SequenceNote& note);
     void seq_remove_note(int pattern_index, int channel, int layer, int note_index);
+    // Replaces a layer's note set in one stop→mutate→publish window
+    // (the batch form the transform toolbox needs). Notes are
+    // re-sorted here; callers may pass any order.
+    void seq_replace_notes(int pattern_index, int channel, int layer,
+                           std::vector<engine::SequenceNote> notes);
     void seq_set_layer_instrument(int pattern_index, int channel, int layer, int instrument);
     void seq_set_layer_enabled(int pattern_index, int channel, int layer, bool enabled);
     // The layer container for editing/rendering; created on demand

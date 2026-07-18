@@ -144,7 +144,6 @@ bool ProjectSession::load_ftrk(const std::filesystem::path& path) {
     povr_raw_ = std::move(result->extras.povr_raw);
     // External plugin state (XPLG, v14): reopen libraries and restore.
     for (const io::FtrkExternalPlugin& external : result->extras.external) {
-        std::string restore_error;
         bool restored = false;
         if (external.kind == 0) {
             if (load_clap_file(external.library_path)) {
@@ -487,6 +486,22 @@ void ProjectSession::seq_add_note(int pattern_index, int channel, int layer,
                                    return a.start_tick < b.start_tick;
                                });
     target->notes.insert(at, note);
+    undo_.clear();
+    publish_bundle();
+}
+
+void ProjectSession::seq_replace_notes(int pattern_index, int channel, int layer,
+                                       std::vector<engine::SequenceNote> notes) {
+    engine::SequenceLayer* target = seq_layer(pattern_index, channel, layer, true);
+    if (target == nullptr) {
+        return;
+    }
+    stop();
+    std::stable_sort(notes.begin(), notes.end(),
+                     [](const engine::SequenceNote& a, const engine::SequenceNote& b) {
+                         return a.start_tick < b.start_tick;
+                     });
+    target->notes = std::move(notes);
     undo_.clear();
     publish_bundle();
 }

@@ -3,6 +3,44 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 14 closed — Pattern + piano-roll editing depth
+
+- Landed: **undo grouping** (`app/undo` begin/end_group + RAII
+  UndoGroup; nested groups commit at the outermost close). **Pattern
+  block operations** (`app/pattern_ops`): sub-column-aware
+  CellSelection, field-masked CellClipboard, copy/cut/paste with edge
+  clipping, clear, transpose (clamped, note-off/empty untouched),
+  FT2-style interpolate (volume, or effect-param with matching
+  commands) — every op one undo entry through ProjectSession.
+  **Pattern grid UI** (`ui/pattern_view`): shift+arrow / mouse-drag
+  block selection with sub-column granularity, theme-glow highlight,
+  Ctrl+C/X/V, Ctrl+I, block Delete, Alt+F1-F4 transpose, right-click
+  context menu listing every operation. **Sequence transforms**
+  (`engine/sequence_ops`, pure + platform-deterministic under a
+  caller-seeded mt19937): quantize, humanize, transpose, reverse,
+  invert, arpeggiate, velocity curves, gate length — input-order
+  contract so selections survive transforms. **Piano-roll UI**
+  (`ui/piano_roll_view`): rubber-band + shift-click multi-select,
+  selection body-drag (move) and right-edge drag (resize), Ctrl+C/V
+  with scroll-anchored paste, the full web toolbox as one strip; all
+  batch edits flow through the new
+  `ProjectSession::seq_replace_notes` (one stop→swap→publish).
+  Fold-ins: INSTRUMENTS source picker (sample/plugin/workspace combos
+  over the catalogue and live plugin nodes), ballistic shell meters
+  (instant attack, exponential release). Help window documents the
+  new keymaps. Four FIXES.md entries (gate-length pitch-blindness
+  fixed, selection-order preservation, deterministic randomness,
+  native-only block ops).
+- Verification: 51/51 both trees (10 new unit tests: block-op
+  round-trips, undo grouping, exact-value transform outputs with
+  seeded rng); clang-tidy clean on all touched files; input-script
+  runs with pixel-checked screenshots — block selection highlight
+  with field trimming visible, paste at row 8 CH3 verified, piano
+  roll +12 transpose moved notes exactly 12 rows with selection
+  following, copy/paste/move/resize/escape all captured; CI green on
+  both platforms.
+- Backup: `NanoTracker_stage14_2026-07-18.tar.gz`; git tag `stage-14`.
+
 ## 2026-07-18 — Stage 13 closed — Repo, CI, Windows beta (post-v1 opens)
 
 - Landed: **public repository** — `git init` in Output/, publish scrub

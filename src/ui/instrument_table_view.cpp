@@ -131,7 +131,7 @@ void InstrumentTableView::draw(app::ProjectSession& session, const Theme& theme)
                     const bool bound =
                         std::find(entry.bound_tracks.begin(), entry.bound_tracks.end(), ch) !=
                         entry.bound_tracks.end();
-                    std::array<char, 8> label{};
+                    std::array<char, 16> label{};
                     std::snprintf(label.data(), label.size(), "%d", ch + 1);
                     if (ch > 0) {
                         ImGui::SameLine(0.0F, 3.0F);

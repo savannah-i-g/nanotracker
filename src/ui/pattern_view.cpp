@@ -1,5 +1,6 @@
 #include "ui/pattern_view.h"
 
+#include "app/pattern_ops.h"
 #include "engine/tracker_engine.h"
 
 #include <algorithm>
@@ -74,6 +75,21 @@ constexpr std::array<std::pair<ImGuiKey, int>, 16> kHexKeys = {{
     {ImGuiKey_F, 15},
 }};
 
+// Cursor fields split the effect command from its parameter; block
+// operations treat them as one sub-column (pattern_ops CellField).
+app::CellField cell_field(int cursor_field) {
+    if (cursor_field <= static_cast<int>(app::CellField::kVolume)) {
+        return static_cast<app::CellField>(cursor_field);
+    }
+    return app::CellField::kEffect;
+}
+
+// Sub-column x bands inside a cell in character units of the drawn
+// text layout "C-4 01 40 000"; the effect band runs to the cell edge.
+// Must agree with the click hit-test bands below.
+constexpr std::array<float, app::kCellFieldCount> kFieldLeft = {0.0F, 4.0F, 7.0F, 10.0F};
+constexpr std::array<float, app::kCellFieldCount> kFieldRight = {4.0F, 7.0F, 10.0F, 15.0F};
+
 } // namespace
 
 void PatternView::advance_cursor_down(int rows) {
@@ -93,6 +109,18 @@ void PatternView::clamp_scroll(int rows, int visible_rows) {
     if (cursor_.row >= scroll_row_ + visible_rows_) {
         scroll_row_ = cursor_.row - visible_rows_ + 1;
     }
+}
+
+app::CellSelection PatternView::block_selection(int pattern_index) const {
+    app::CellSelection sel;
+    sel.pattern = pattern_index;
+    sel.row0 = selection_.active ? selection_.row : cursor_.row;
+    sel.row1 = cursor_.row;
+    sel.channel0 = selection_.active ? selection_.channel : cursor_.channel;
+    sel.channel1 = cursor_.channel;
+    sel.field0 = cell_field(selection_.active ? selection_.field : cursor_.field);
+    sel.field1 = cell_field(cursor_.field);
+    return sel;
 }
 
 void PatternView::handle_keys(app::ProjectSession& session, const engine::TrackerPattern& pattern,
@@ -115,11 +143,30 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         session.stop();
         return;
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) {
+    if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_F1, false)) {
         octave_ = std::max(0, octave_ - 1);
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
+    if (!io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
         octave_ = std::min(7, octave_ + 1);
+    }
+
+    // Classic tracker transpose over the selection (or cursor cell):
+    // Alt+F1/F2 by a semitone, Alt+F3/F4 by an octave.
+    if (io.KeyAlt) {
+        int semitones = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) {
+            semitones = -1;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
+            semitones = 1;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_F3, false)) {
+            semitones = -12;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_F4, false)) {
+            semitones = 12;
+        }
+        if (semitones != 0) {
+            app::transpose_cells(session, block_selection(pattern_index), semitones);
+            return;
+        }
     }
 
     // Undo / redo.
@@ -132,14 +179,47 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         return;
     }
 
-    // Navigation.
+    // Block clipboard + interpolate (app/pattern_ops); with no active
+    // selection these act on the cursor cell as a 1×1 block.
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+        clipboard_ = app::copy_cells(session, block_selection(pattern_index));
+        return;
+    }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+        clipboard_ = app::cut_cells(session, block_selection(pattern_index));
+        return;
+    }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) {
+        app::paste_cells(session, clipboard_, pattern_index, cursor_.row, cursor_.channel);
+        return;
+    }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I, false)) {
+        app::interpolate_cells(session, block_selection(pattern_index));
+        return;
+    }
+
+    // Navigation. Shift-extended movement grows the selection from a
+    // fixed anchor; unmodified movement collapses it, Escape drops it.
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        selection_.active = false;
+    }
+    const auto track_selection = [this, &io] {
+        if (!io.KeyShift) {
+            selection_.active = false;
+        } else if (!selection_.active) {
+            selection_ = {cursor_.row, cursor_.channel, cursor_.field, true};
+        }
+    };
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+        track_selection();
         cursor_.row = std::max(0, cursor_.row - 1);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+        track_selection();
         cursor_.row = std::min(rows - 1, cursor_.row + 1);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+        track_selection();
         if (cursor_.field > 0) {
             --cursor_.field;
         } else if (cursor_.channel > 0) {
@@ -148,6 +228,7 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+        track_selection();
         if (cursor_.field < 4) {
             ++cursor_.field;
         } else if (cursor_.channel < channels - 1) {
@@ -156,23 +237,28 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+        selection_.active = false; // shift here means reverse-tab
         const int step = io.KeyShift ? channels - 1 : 1;
         cursor_.channel = (cursor_.channel + step) % channels;
         cursor_.field = 0;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) {
+        track_selection();
         cursor_.row = std::max(0, cursor_.row - 16);
         scroll_row_ = std::max(0, scroll_row_ - 16);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) {
+        track_selection();
         cursor_.row = std::min(rows - 1, cursor_.row + 16);
         scroll_row_ += 16;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
+        track_selection();
         cursor_.row = 0;
         scroll_row_ = 0;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_End, false)) {
+        track_selection();
         cursor_.row = rows - 1;
         scroll_row_ = std::max(0, rows - visible_rows);
     }
@@ -181,8 +267,14 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         pattern
             .rows[static_cast<std::size_t>(cursor_.row)][static_cast<std::size_t>(cursor_.channel)];
 
-    // Delete clears by field (full cell on the note field).
+    // Delete clears the active selection as a block (Ctrl forces the
+    // block path for the cursor cell); without one it keeps the
+    // classic per-field clear with cursor advance.
     if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+        if (selection_.active || io.KeyCtrl) {
+            app::clear_cells(session, block_selection(pattern_index));
+            return;
+        }
         engine::TrackerCell cell = current;
         switch (cursor_.field) {
         case 0:
@@ -323,6 +415,7 @@ void PatternView::draw_order_list(app::ProjectSession& session,
             edit_pattern_ = pat;
             cursor_.row = 0;
             scroll_row_ = 0;
+            selection_.active = false;
         }
     }
 }
@@ -407,6 +500,21 @@ void PatternView::draw_grid(app::ProjectSession& session, const audio::EngineSna
     const bool playing_this_pattern =
         snapshot.transport_playing && snapshot.pattern_index == pattern_index;
 
+    // Selection block normalized for drawing (mirror of the ops'
+    // normalization, so the highlight covers exactly the cells an
+    // operation would touch): rows and channels ordered, the field
+    // edges following their channels.
+    app::CellSelection sel = block_selection(pattern_index);
+    if (sel.row0 > sel.row1) {
+        std::swap(sel.row0, sel.row1);
+    }
+    if (sel.channel0 > sel.channel1) {
+        std::swap(sel.channel0, sel.channel1);
+        std::swap(sel.field0, sel.field1);
+    } else if (sel.channel0 == sel.channel1 && sel.field0 > sel.field1) {
+        std::swap(sel.field0, sel.field1);
+    }
+
     const int start_row = scroll_row_;
     const int end_row = std::min(rows, start_row + visible_rows);
     for (int row = start_row; row < end_row; ++row) {
@@ -431,6 +539,21 @@ void PatternView::draw_grid(app::ProjectSession& session, const audio::EngineSna
             const engine::TrackerCell& cell =
                 pattern.rows[static_cast<std::size_t>(row)][static_cast<std::size_t>(ch)];
             const float cx = origin.x + m.row_num_w + (static_cast<float>(ch - start_ch) * m.col_w);
+
+            // Selection highlight under the text; edge channels trim
+            // to the selected sub-columns. The cursor rect paints over
+            // it so the cursor stays visible inside a block.
+            if (selection_.active && row >= sel.row0 && row <= sel.row1 && ch >= sel.channel0 &&
+                ch <= sel.channel1) {
+                const int f0 = ch == sel.channel0 ? static_cast<int>(sel.field0) : 0;
+                const int f1 =
+                    ch == sel.channel1 ? static_cast<int>(sel.field1) : app::kCellFieldCount - 1;
+                const float x0 = cx + (kFieldLeft[static_cast<std::size_t>(f0)] * m.char_w);
+                const float x1 = std::min(
+                    cx + (kFieldRight[static_cast<std::size_t>(f1)] * m.char_w), cx + m.col_w - 2);
+                draw->AddRectFilled({x0, ry}, {x1, ry + m.row_h}, col(theme.primary_glow));
+            }
+
             const bool is_cursor_cell = row == cursor_.row && ch == cursor_.channel;
             if (is_cursor_cell) {
                 draw->AddRectFilled({cx, ry}, {cx + m.col_w - 2, ry + m.row_h}, col(theme.border));
@@ -497,36 +620,89 @@ void PatternView::draw_grid(app::ProjectSession& session, const audio::EngineSna
         draw->AddLine({cx, origin.y + m.header_h - 2}, {cx, origin.y + avail.y}, col(theme.border));
     }
 
-    // Click to move the cursor (field resolved from x within the cell).
+    // Grid mouse: press moves the cursor and re-anchors, dragging away
+    // from the pressed cell opens a selection, right-click offers the
+    // block operations (field resolved from x within the cell).
     ImGui::InvisibleButton("grid", avail);
-    if (ImGui::IsItemClicked()) {
-        const ImVec2 mouse = ImGui::GetMousePos();
+    const auto cell_under = [&](const ImVec2& mouse, Cursor& out) {
         const float local_x = mouse.x - origin.x - m.row_num_w;
         const float local_y = mouse.y - origin.y - m.header_h;
-        if (local_x >= 0 && local_y >= 0) {
-            const int ch = start_ch + static_cast<int>(local_x / m.col_w);
-            const int row = start_row + static_cast<int>(local_y / m.row_h);
-            if (ch < channels && row < rows) {
-                cursor_.channel = ch;
-                cursor_.row = row;
-                const float in_cell = local_x - (static_cast<float>(ch - start_ch) * m.col_w);
-                const float u = in_cell / m.char_w;
-                // Field bands in character units: note(4) inst(3)
-                // vol(3) effect(1.5) param(rest).
-                if (u < 4) {
-                    cursor_.field = 0;
-                } else if (u < 7) {
-                    cursor_.field = 1;
-                } else if (u < 10) {
-                    cursor_.field = 2;
-                } else if (u < 11.5F) {
-                    cursor_.field = 3;
-                } else {
-                    cursor_.field = 4;
-                }
-            }
+        if (local_x < 0 || local_y < 0) {
+            return false;
         }
+        const int ch = start_ch + static_cast<int>(local_x / m.col_w);
+        const int row = start_row + static_cast<int>(local_y / m.row_h);
+        if (ch >= channels || row >= rows) {
+            return false;
+        }
+        out.channel = ch;
+        out.row = row;
+        const float in_cell = local_x - (static_cast<float>(ch - start_ch) * m.col_w);
+        const float u = in_cell / m.char_w;
+        // Field bands in character units: note(4) inst(3) vol(3)
+        // effect(1.5) param(rest).
+        if (u < 4) {
+            out.field = 0;
+        } else if (u < 7) {
+            out.field = 1;
+        } else if (u < 10) {
+            out.field = 2;
+        } else if (u < 11.5F) {
+            out.field = 3;
+        } else {
+            out.field = 4;
+        }
+        return true;
+    };
+    Cursor hit;
+    if (ImGui::IsItemActivated() && cell_under(ImGui::GetMousePos(), hit)) {
+        cursor_ = hit;
+        selection_ = {hit.row, hit.channel, hit.field, false};
     }
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.0F) &&
+        cell_under(ImGui::GetMousePos(), hit)) {
+        cursor_ = hit;
+        selection_.active = hit.row != selection_.row || hit.channel != selection_.channel ||
+                            hit.field != selection_.field;
+    }
+    draw_context_menu(session, pattern_index);
+}
+
+void PatternView::draw_context_menu(app::ProjectSession& session, int pattern_index) {
+    if (!ImGui::BeginPopupContextItem("block_ops")) {
+        return;
+    }
+    const app::CellSelection block = block_selection(pattern_index);
+    if (ImGui::MenuItem("COPY", "CTRL+C")) {
+        clipboard_ = app::copy_cells(session, block);
+    }
+    if (ImGui::MenuItem("CUT", "CTRL+X")) {
+        clipboard_ = app::cut_cells(session, block);
+    }
+    if (ImGui::MenuItem("PASTE", "CTRL+V", false, !clipboard_.empty())) {
+        app::paste_cells(session, clipboard_, pattern_index, cursor_.row, cursor_.channel);
+    }
+    if (ImGui::MenuItem("CLEAR", "DEL")) {
+        app::clear_cells(session, block);
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("TRANSPOSE -1", "ALT+F1")) {
+        app::transpose_cells(session, block, -1);
+    }
+    if (ImGui::MenuItem("TRANSPOSE +1", "ALT+F2")) {
+        app::transpose_cells(session, block, 1);
+    }
+    if (ImGui::MenuItem("OCTAVE -1", "ALT+F3")) {
+        app::transpose_cells(session, block, -12);
+    }
+    if (ImGui::MenuItem("OCTAVE +1", "ALT+F4")) {
+        app::transpose_cells(session, block, 12);
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("INTERPOLATE", "CTRL+I")) {
+        app::interpolate_cells(session, block);
+    }
+    ImGui::EndPopup();
 }
 
 void PatternView::draw(app::ProjectSession& session, const audio::EngineSnapshot& snapshot,

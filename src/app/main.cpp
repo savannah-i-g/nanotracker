@@ -405,6 +405,11 @@ void draw_help_window(ShellState& shell) {
             "Arrows move the cursor; note keys enter notes (Z-M bottom octave, Q-P upper); "
             "digits edit instrument/volume/effect columns; Delete clears; Ctrl+Z undoes. "
             "Space toggles the transport.");
+        ImGui::TextWrapped(
+            "Blocks: Shift+arrows (or mouse drag) select; Ctrl+C/X/V copy/cut/paste; "
+            "Delete clears the block; Ctrl+I interpolates volume or effect params; "
+            "Alt+F1/F2 transpose a semitone, Alt+F3/F4 an octave. Right-click lists "
+            "every block operation.");
         ImGui::SeparatorText("workspace");
         ImGui::TextWrapped(
             "Drag from an output jack to a compatible input to patch a cable. The midpoint "
@@ -419,7 +424,11 @@ void draw_help_window(ShellState& shell) {
         ImGui::SeparatorText("sequence layers");
         ImGui::TextWrapped(
             "The piano roll layers up to four polyphonic lanes per channel on top of the "
-            "pattern grid. Click adds a note, right-click removes.");
+            "pattern grid. Click adds a note, right-click removes. Drag over empty space "
+            "rubber-band selects; Shift+click toggles; drag a note body to move the "
+            "selection, its right edge to resize; Ctrl+C/V copy/paste. The toolbox row "
+            "applies quantize, humanize, transpose, reverse, invert, arpeggiate, velocity "
+            "curves and gate length to the selection (or all notes).");
     }
     ImGui::End();
 }
