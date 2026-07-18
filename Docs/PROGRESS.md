@@ -3,6 +3,38 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 23 closed — Note entry, piano roll UX, module entry points
+
+- Landed: **NOTE ENTRY window** (`ui/note_entry_view`): octave /
+  edit-step / slot / default-volume editors, last-note readout,
+  entry-mode indicator, 3-octave on-screen keyboard entering through
+  exactly `app::enter_note_cell` (identical cell to typing); state
+  canonical in PatternView via accessors; docked into the bottom
+  strip; `advance_cursor_down` now honours edit step. **Piano roll
+  toolbar**: CH/L identity, select/add modes (add = drag-length
+  draw), layer selector with note-presence marks + "+ layer",
+  persisted audition toggle, play-from-start (row-accurate start
+  needs a session method — recorded). **Module entry points**:
+  FILE → "import module…", import-vs-player choice on module
+  extensions (import default), MODULE PLAYER retitle + hint, import
+  warnings surfaced in a visible report window. Hotfixes shipped
+  mid-stage from owner testing: UI-scale slider commits on release
+  (runaway + snap-back both fixed), CLAP editor creates the gui
+  before can_resize/get_size (u-he host-misuse abort), instrument
+  windows persist across tabs, param panels keyed by stable ids.
+- Found (owner file `02fd_-_lumifluidity.it`, triaged read-only):
+  the IT importer's 2.15 double-delta sample decompressor is
+  unexercised by the suite (fixture is uncompressed) and produces
+  garbage PCM; the 31-slot cap silently drops samples 32-35.
+  Dedicated fix stage queued before the polish sweep.
+- Verification: 131/131 both trees; tidy/format clean; six
+  fresh-config screenshots (NOTE ENTRY docked with keyboard; two
+  key-clicks landing C-4/E-4 with cursor advance + readout; toolbar;
+  FILE menu; --load nttest.mod proving import routing with imported
+  sample visible; drag-add with layer mark); TyrellN6.clap editor
+  verified live post-fix (exit 0).
+- Backup: `NanoTracker_stage23_2026-07-18.tar.gz`; git tag `stage-23`.
+
 ## 2026-07-18 — Stage 22 closed — Arctic Light default, UI scale, shell cleanup
 
 - Landed: **ARCTIC LIGHT** (the owner's original web palette,

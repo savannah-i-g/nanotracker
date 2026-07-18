@@ -30,8 +30,12 @@ bool ModuleView::load_file(audio::AudioEngine& audio, modplay::ModulePlayer& pla
 
 void ModuleView::draw(audio::AudioEngine& audio, modplay::ModulePlayer& player,
                       const Theme& theme) {
-    ImGui::SetNextWindowSize(ImVec2(430, 180), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("MODULE")) {
+    ImGui::SetNextWindowSize(ImVec2(430, 200), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("MODULE PLAYER")) {
+        // Player only: faithful playback of the raw module. Editing a
+        // module means converting it to a project — FILE → import module.
+        ImGui::TextColored(theme.text_dim, "player only - FILE > import module converts to a "
+                                           "project");
         ImGui::InputTextWithHint("##modpath", "path/to/module.mod", path_buf_.data(),
                                  path_buf_.size());
         ImGui::SameLine();
@@ -52,7 +56,7 @@ void ModuleView::draw(audio::AudioEngine& audio, modplay::ModulePlayer& player,
             ImGui::TextColored(theme.text_dim, "ORD %02d ROW %02d", player.current_order(),
                                player.current_row());
 
-            float position = static_cast<float>(player.position_seconds());
+            auto position = static_cast<float>(player.position_seconds());
             const float duration = std::max(0.01F, static_cast<float>(player.duration_seconds()));
             ImGui::SetNextItemWidth(-1.0F);
             if (ImGui::SliderFloat("##pos", &position, 0.0F, duration, "%.1fs")) {

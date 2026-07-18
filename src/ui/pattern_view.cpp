@@ -93,8 +93,10 @@ constexpr std::array<float, app::kCellFieldCount> kFieldRight = {4.0F, 7.0F, 10.
 } // namespace
 
 void PatternView::advance_cursor_down(int rows) {
-    cursor_.row = std::min(rows - 1, cursor_.row + 1);
-    if (cursor_.row >= scroll_row_ + visible_rows_) {
+    // Edit step (0 holds the cursor); scroll follows for a step that
+    // jumps past the visible band.
+    cursor_.row = std::min(rows - 1, cursor_.row + std::max(0, edit_step_));
+    while (cursor_.row >= scroll_row_ + visible_rows_) {
         ++scroll_row_;
     }
 }
@@ -321,11 +323,15 @@ void PatternView::handle_keys(app::ProjectSession& session, const engine::Tracke
         for (const NoteKey& nk : kNoteKeys) {
             if (ImGui::IsKeyPressed(nk.key, false) && !io.KeyCtrl) {
                 const int note = std::min(96, nk.offset + (octave_ * 12));
-                // Shared with MIDI step entry (app/midi_record):
-                // bound-resolution, cell write and audition live there
-                // so both entry paths stay identical.
+                // Shared with MIDI step entry (app/midi_record) and the
+                // NOTE ENTRY panel's on-screen keyboard: bound-resolution,
+                // cell write and audition live in enter_note_cell so every
+                // entry path stays identical. default_volume_ is -1 by
+                // default (leave the volume column), so a keystroke and a
+                // panel key land the same cell.
                 app::enter_note_cell(session, pattern_index, cursor_.row, cursor_.channel, note,
-                                     selected_slot_, -1, true);
+                                     selected_slot_, default_volume_, true);
+                last_note_ = note;
                 advance_cursor_down(rows);
                 return;
             }

@@ -11,7 +11,10 @@
 #include "app/pattern_ops.h"
 #include "app/project_session.h"
 #include "audio/audio_engine.h"
+#include "engine/tracker_types.h"
 #include "ui/theme.h"
+
+#include <algorithm>
 
 namespace nt::ui {
 
@@ -34,6 +37,36 @@ public:
     [[nodiscard]] int step_entry_slot() const override { return selected_slot_; }
 
     void step_advance() override { advance_cursor_down(active_rows_); }
+
+    // ── Note-entry state (shared with ui/note_entry_view) ────────────
+    // The grid owns the canonical entry state; the NOTE ENTRY panel is a
+    // view onto it, so both edit the same octave/step/slot and read the
+    // same last note. octave and edit_step drive keyboard typing AND
+    // MIDI step entry (step_advance moves by edit_step). default_volume
+    // is the volume column stamped on note entry — -1 keeps the cell's
+    // column, matching classic tracker typing, so the on-screen keyboard
+    // and a keystroke land the identical cell.
+    [[nodiscard]] int octave() const { return octave_; }
+
+    void set_octave(int octave) { octave_ = std::clamp(octave, 0, 7); }
+
+    [[nodiscard]] int edit_step() const { return edit_step_; }
+
+    void set_edit_step(int step) { edit_step_ = std::clamp(step, 0, 16); }
+
+    [[nodiscard]] int default_volume() const { return default_volume_; }
+
+    void set_default_volume(int volume) {
+        default_volume_ = volume < 0 ? -1 : std::min(volume, 0x40);
+    }
+
+    [[nodiscard]] int entry_slot() const { return selected_slot_; }
+
+    void set_entry_slot(int slot) { selected_slot_ = std::clamp(slot, 1, engine::kMaxSamples); }
+
+    [[nodiscard]] int last_note() const { return last_note_; }
+
+    void set_last_note(int note) { last_note_ = note; }
 
 private:
     struct Cursor {
@@ -74,6 +107,9 @@ private:
     int scroll_row_ = 0;
     int channel_scroll_ = 0;
     int octave_ = 4;
+    int edit_step_ = 1;       // rows advanced per note entry (0 = hold)
+    int default_volume_ = -1; // volume column on entry; -1 = keep (typing)
+    int last_note_ = 0;       // most recent note written, for the panel readout
     int selected_slot_ = 1;
     int edit_pattern_ = 0; // pattern being edited (order-list selection)
     int visible_rows_ = 20;

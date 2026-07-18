@@ -229,7 +229,124 @@ void PianoRollView::draw_toolbox(app::ProjectSession& session, int pattern_index
     }
 }
 
-void PianoRollView::draw(app::ProjectSession& session, const Theme& theme) {
+void PianoRollView::audition_pitch(app::ProjectSession& session, const engine::SequenceLayer* layer,
+                                   int pitch) const {
+    const int slot = layer != nullptr && layer->instrument > 0 ? layer->instrument : 1;
+    const auto& table = session.project().instrument_table;
+    const bool is_plugin =
+        slot >= 1 && slot <= static_cast<int>(table.size()) &&
+        table[static_cast<std::size_t>(slot - 1)].type != engine::InstrumentSourceType::kSample;
+    if (is_plugin) {
+        session.preview_plugin_note(slot, pitch, 0.9F);
+    } else {
+        session.preview_note(channel_, slot, pitch - 11); // MIDI → tracker note
+    }
+}
+
+void PianoRollView::draw_toolbar(app::ProjectSession& session, io::Settings& settings,
+                                 int pattern_index, const Theme& theme) {
+    const engine::TrackerProject& project = session.project();
+
+    // ── Identity, mode, audition, transport ──────────────────────────
+    // Channel/layer identity stays visible up here (the window title is
+    // shared by the dock tab); the mode toggle mirrors the pattern
+    // grid's select-vs-edit split.
+    ImGui::TextColored(theme.primary, "CH%d  L%d", channel_ + 1, layer_);
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    int mode = static_cast<int>(mode_);
+    ImGui::RadioButton("select", &mode, static_cast<int>(Mode::kSelect));
+    ImGui::SetItemTooltip("marquee select; drag a note to move, its right edge to resize");
+    ImGui::SameLine();
+    ImGui::RadioButton("add", &mode, static_cast<int>(Mode::kAdd));
+    ImGui::SetItemTooltip("click adds a note; drag sets its length; right-click removes");
+    mode_ = static_cast<Mode>(mode);
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    ImGui::Checkbox("audition", &settings.piano_roll_audition);
+    ImGui::SetItemTooltip("preview added notes through the layer instrument");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("play from start")) {
+        session.play();
+    }
+    // The session exposes only a from-the-top transport start (order 0);
+    // row-accurate "play from here" is not wired for the piano roll yet.
+    ImGui::SetItemTooltip("start the transport (F5 in the grid also toggles)");
+
+    // ── Layer selector: note presence + "+ layer" ────────────────────
+    const auto select_layer = [this](int target) {
+        if (target != layer_) {
+            layer_ = target;
+            selection_.clear();
+            drag_ = Drag::kNone;
+        }
+    };
+    ImGui::TextDisabled("layers");
+    int first_empty = -1;
+    for (int l = 0; l < engine::kMaxSeqLayersPerChannel; ++l) {
+        const engine::SequenceLayer* candidate =
+            session.seq_layer(pattern_index, channel_, l, false);
+        const bool has_notes = candidate != nullptr && !candidate->notes.empty();
+        if (!has_notes && first_empty < 0) {
+            first_empty = l;
+        }
+        ImGui::SameLine();
+        // '*' marks lanes carrying notes; colour tracks the selection.
+        std::array<char, 16> label{};
+        std::snprintf(label.data(), label.size(), "%s%d##layer%d", has_notes ? "*" : "", l, l);
+        ImVec4 tint = theme.text_dim;
+        if (l == layer_) {
+            tint = theme.primary;
+        } else if (has_notes) {
+            tint = theme.text;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, tint);
+        if (ImGui::SmallButton(label.data())) {
+            select_layer(l);
+        }
+        ImGui::PopStyleColor();
+        ImGui::SetItemTooltip(has_notes ? "layer %d (has notes)" : "layer %d (empty)", l);
+    }
+    ImGui::SameLine();
+    // "+ layer": jump to the first empty lane (created implicitly on the
+    // first note); all four in use → nothing to add.
+    ImGui::BeginDisabled(first_empty < 0);
+    if (ImGui::SmallButton("+ layer")) {
+        select_layer(first_empty);
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("switch to the next empty layer");
+
+    // ── Channel, instrument, enable, grid pitch base ─────────────────
+    ImGui::SetNextItemWidth(90.0F);
+    int channel = channel_;
+    if (ImGui::SliderInt("channel", &channel, 0, project.channels - 1)) {
+        channel_ = channel;
+        selection_.clear(); // indices are per-layer
+        drag_ = Drag::kNone;
+    }
+    const engine::SequenceLayer* current =
+        session.seq_layer(pattern_index, channel_, layer_, false);
+    int instrument = current != nullptr ? current->instrument : 0;
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0F);
+    if (ImGui::InputInt("ins", &instrument)) {
+        session.seq_set_layer_instrument(pattern_index, channel_, layer_,
+                                         std::clamp(instrument, 0, engine::kMaxSamples));
+    }
+    bool enabled = current == nullptr || current->enabled;
+    ImGui::SameLine();
+    if (ImGui::Checkbox("on", &enabled)) {
+        session.seq_set_layer_enabled(pattern_index, channel_, layer_, enabled);
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.0F);
+    ImGui::SliderInt("octave", &base_pitch_, 24, 72, "base %d");
+}
+
+void PianoRollView::draw(app::ProjectSession& session, io::Settings& settings, const Theme& theme) {
     ImGui::SetNextWindowPos(ImVec2{60, 60}, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2{720, 620}, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("piano roll")) {
@@ -241,35 +358,8 @@ void PianoRollView::draw(app::ProjectSession& session, const Theme& theme) {
     const int pattern_index = 0; // follows the pattern editor later
     channel_ = std::clamp(channel_, 0, project.channels - 1);
 
-    ImGui::SetNextItemWidth(90.0F);
-    if (ImGui::SliderInt("channel", &channel_, 0, project.channels - 1)) {
-        selection_.clear(); // indices are per-layer
-        drag_ = Drag::kNone;
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(90.0F);
-    if (ImGui::SliderInt("layer", &layer_, 0, engine::kMaxSeqLayersPerChannel - 1)) {
-        selection_.clear();
-        drag_ = Drag::kNone;
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(110.0F);
-    ImGui::SliderInt("octave", &base_pitch_, 24, 72, "base %d");
-
+    draw_toolbar(session, settings, pattern_index, theme);
     engine::SequenceLayer* layer = session.seq_layer(pattern_index, channel_, layer_, false);
-    int instrument = layer != nullptr ? layer->instrument : 0;
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.0F);
-    if (ImGui::InputInt("ins", &instrument)) {
-        session.seq_set_layer_instrument(pattern_index, channel_, layer_,
-                                         std::clamp(instrument, 0, engine::kMaxSamples));
-        layer = session.seq_layer(pattern_index, channel_, layer_, false);
-    }
-    bool enabled = layer == nullptr || layer->enabled;
-    ImGui::SameLine();
-    if (ImGui::Checkbox("on", &enabled)) {
-        session.seq_set_layer_enabled(pattern_index, channel_, layer_, enabled);
-    }
 
     const int rows = project.rows_per_pattern;
     const int ticks_per_row = std::max(1, project.speed);
@@ -341,6 +431,27 @@ void PianoRollView::draw(app::ProjectSession& session, const Theme& theme) {
         resize_duration = std::max(1, resize_duration);
     }
 
+    // Add-mode draw gesture (row-snapped): start row from the press, end
+    // row from the current mouse, duration at least one row. A stationary
+    // press yields a one-row note — the classic click-to-add.
+    int draw_start_tick = 0;
+    int draw_duration = 0;
+    int draw_pitch = 0;
+    if (drag_ == Drag::kDraw) {
+        const int start_raw = std::clamp(
+            static_cast<int>(std::min(drag_press_.x, local.x) / kTickWidth), 0, total_ticks - 1);
+        draw_start_tick = (start_raw / ticks_per_row) * ticks_per_row;
+        const int end_raw =
+            std::clamp(static_cast<int>(std::ceil(std::max(drag_press_.x, local.x) / kTickWidth)),
+                       draw_start_tick + 1, total_ticks);
+        const int span =
+            ((end_raw - draw_start_tick + ticks_per_row - 1) / ticks_per_row) * ticks_per_row;
+        draw_duration = std::max(ticks_per_row, std::min(span, total_ticks - draw_start_tick));
+        draw_pitch = base_pitch_ +
+                     (kPitchRows - 1 -
+                      std::clamp(static_cast<int>(drag_press_.y / kRowHeight), 0, kPitchRows - 1));
+    }
+
     // Notes; selected ones fill with the text color, and an active
     // gesture renders at its preview position.
     int hovered_note = -1;
@@ -391,6 +502,24 @@ void PianoRollView::draw(app::ProjectSession& session, const Theme& theme) {
         draw->AddRect(a, b, ImGui::GetColorU32(theme.primary));
     }
 
+    // Add-mode preview: the note that will be committed at release.
+    if (drag_ == Drag::kDraw) {
+        const int row_offset = draw_pitch - base_pitch_;
+        if (row_offset >= 0 && row_offset < kPitchRows) {
+            const float x0 = origin.x + (static_cast<float>(draw_start_tick) * kTickWidth);
+            const float x1 =
+                origin.x + (static_cast<float>(draw_start_tick + draw_duration) * kTickWidth);
+            const float y0 =
+                origin.y + (static_cast<float>(kPitchRows - 1 - row_offset) * kRowHeight);
+            ImVec4 fill = theme.primary;
+            fill.w = 0.4F;
+            draw->AddRectFilled(ImVec2{x0 + 1, y0 + 1}, ImVec2{x1 - 1, y0 + kRowHeight - 1},
+                                ImGui::GetColorU32(fill));
+            draw->AddRect(ImVec2{x0, y0}, ImVec2{x1, y0 + kRowHeight},
+                          ImGui::GetColorU32(theme.primary));
+        }
+    }
+
     // Interaction. Press decides the gesture — note body starts a
     // selection move, note tail a resize, empty space a marquee — and
     // release resolves it. Shift+click toggles membership without
@@ -424,32 +553,32 @@ void PianoRollView::draw(app::ProjectSession& session, const Theme& theme) {
                 }
             }
         } else {
-            drag_ = Drag::kMarquee;
+            // Empty space: add mode draws a note, select mode marquees.
+            drag_ = mode_ == Mode::kAdd ? Drag::kDraw : Drag::kMarquee;
         }
     }
 
     if (ImGui::IsItemDeactivated() && drag_ != Drag::kNone) {
-        if (drag_ == Drag::kMarquee) {
+        if (drag_ == Drag::kDraw) {
+            // Add mode commit (click or drag-with-duration). Adding grows
+            // the layer implicitly; audition previews when the toggle is on.
+            session.seq_add_note(pattern_index, channel_, layer_,
+                                 {.pitch = draw_pitch,
+                                  .start_tick = draw_start_tick,
+                                  .duration_ticks = draw_duration,
+                                  .velocity = 100});
+            if (settings.piano_roll_audition) {
+                audition_pitch(session, session.seq_layer(pattern_index, channel_, layer_, false),
+                               draw_pitch);
+            }
+        } else if (drag_ == Drag::kMarquee) {
             const bool click = std::abs(local.x - drag_press_.x) < kClickSlopPx &&
                                std::abs(local.y - drag_press_.y) < kClickSlopPx;
             if (click) {
+                // Select mode: an empty click just clears the selection
+                // (adding notes lives in add mode).
                 if (!io.KeyShift) {
-                    if (!selection_.empty()) {
-                        selection_.clear();
-                    } else {
-                        const int tick = std::clamp(static_cast<int>(drag_press_.x / kTickWidth), 0,
-                                                    total_ticks - 1);
-                        const int row_tick = (tick / ticks_per_row) * ticks_per_row; // snap to row
-                        const int pitch =
-                            base_pitch_ + (kPitchRows - 1 -
-                                           std::clamp(static_cast<int>(drag_press_.y / kRowHeight),
-                                                      0, kPitchRows - 1));
-                        session.seq_add_note(pattern_index, channel_, layer_,
-                                             {.pitch = pitch,
-                                              .start_tick = row_tick,
-                                              .duration_ticks = ticks_per_row,
-                                              .velocity = 100});
-                    }
+                    selection_.clear();
                 }
             } else if (layer != nullptr) {
                 const float min_x = std::min(drag_press_.x, local.x);

@@ -24,6 +24,9 @@ struct Settings {
     bool crt_enabled = true;
     float crt_intensity = 0.35F; // 0 = off visually, 1 = full effect
 
+    // Piano roll: preview added/drawn notes through the layer instrument.
+    bool piano_roll_audition = true;
+
     int window_width = 1280;
     int window_height = 720;
 

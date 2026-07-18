@@ -49,6 +49,7 @@ Settings load_settings(const std::filesystem::path& path) {
     read_if(j, "ui_scale", settings.ui_scale);
     read_if(j, "crt_enabled", settings.crt_enabled);
     read_if(j, "crt_intensity", settings.crt_intensity);
+    read_if(j, "piano_roll_audition", settings.piano_roll_audition);
     read_if(j, "window_width", settings.window_width);
     read_if(j, "window_height", settings.window_height);
     read_if(j, "cable_resolution", settings.cable_resolution);
@@ -81,6 +82,7 @@ bool save_settings(const Settings& settings, const std::filesystem::path& path) 
         {"ui_scale", settings.ui_scale},
         {"crt_enabled", settings.crt_enabled},
         {"crt_intensity", settings.crt_intensity},
+        {"piano_roll_audition", settings.piano_roll_audition},
         {"window_width", settings.window_width},
         {"window_height", settings.window_height},
         {"cable_resolution", settings.cable_resolution},

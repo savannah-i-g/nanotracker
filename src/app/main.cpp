@@ -26,6 +26,7 @@
 #include "ui/local_api_view.h"
 #include "ui/midi_view.h"
 #include "ui/module_view.h"
+#include "ui/note_entry_view.h"
 #include "ui/pattern_view.h"
 #include "ui/piano_roll_view.h"
 #include "ui/sample_browser_view.h"
@@ -37,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -256,6 +258,11 @@ struct ShellState {
     bool show_help = false;
     bool show_licences = false;
     bool show_export = false;
+    // Module-import report: populated from ProjectSession::load_warnings
+    // after an import, surfaced in its own window (not just the status
+    // list) so the importer's approximation counts are visible.
+    bool show_import_report = false;
+    std::vector<std::string> import_report;
 };
 
 // Per-window visibility, driven by the VIEW menu. Defaults mirror the
@@ -271,6 +278,7 @@ struct WindowVisibility {
     bool samples = true;
     bool instruments = true;
     bool sample_browser = true;
+    bool note_entry = true;
     bool midi = true;
     bool local_api = true;
     bool debug = false; // diagnostics surface, off by default
@@ -406,6 +414,83 @@ bool draw_path_dialog(const char* title, const char* verb, std::array<char, 512>
     return accepted;
 }
 
+// A module container the importer understands (as opposed to a native
+// .ftrk project or any other file).
+bool is_module_path(const char* path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".mod" || ext == ".xm" || ext == ".s3m" || ext == ".it";
+}
+
+// Copies the importer's warnings/info into the shell and opens the
+// report window (called after every import path).
+void capture_import_report(ShellState& shell, nt::app::ProjectSession& session) {
+    shell.import_report = session.load_warnings();
+    shell.show_import_report = true;
+}
+
+// Module disambiguation modal (FILE → open on a module extension):
+// import into an editable project (default) or hand the file to the
+// standalone player. `path` is the module chosen in the open dialog.
+void draw_module_choice_modal(const char* id, const char* path, nt::audio::AudioEngine& audio,
+                              nt::app::ProjectSession& session,
+                              nt::modplay::ModulePlayer& module_player,
+                              nt::ui::ModuleView& module_view, ShellState& shell) {
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
+    if (ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("How should this module open?");
+        ImGui::TextDisabled("%s", path);
+        ImGui::Spacing();
+        // Default: convert to an editable project through the importer.
+        if (ImGui::Button("Import as project")) {
+            if (!session.load_file(path)) {
+                std::fprintf(stderr, "import: %s\n", session.error().c_str());
+            } else {
+                capture_import_report(shell, session);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SetItemDefaultFocus();
+        ImGui::SetItemTooltip("convert samples/patterns/order into an editable project");
+        ImGui::SameLine();
+        if (ImGui::Button("Open in module player")) {
+            module_view.load_file(audio, module_player, path);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SetItemTooltip("faithful playback only - no editing");
+        ImGui::SameLine();
+        if (ImGui::Button("cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// The importer's report (approximation counts / warnings), shown after
+// an import so nothing is buried in the transient status list.
+void draw_import_report_window(ShellState& shell) {
+    if (!shell.show_import_report) {
+        return;
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
+    ImGui::SetNextWindowSize(ImVec2{480, 360}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("module import report", &shell.show_import_report)) {
+        if (shell.import_report.empty()) {
+            ImGui::TextWrapped("Import complete - no anomalies reported.");
+        } else {
+            ImGui::Text("import complete - %zu note(s):", shell.import_report.size());
+            ImGui::Separator();
+            for (const std::string& line : shell.import_report) {
+                ImGui::TextWrapped("- %s", line.c_str());
+            }
+        }
+    }
+    ImGui::End();
+}
+
 // The main menu bar. Every action routes through the exact session/
 // settings paths the shell window used — the menu is an additional
 // surface, never new semantics. Returns the active theme (SETTINGS can
@@ -414,13 +499,20 @@ bool draw_path_dialog(const char* title, const char* verb, std::array<char, 512>
 const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Settings& settings,
                                         nt::audio::AudioEngine& audio,
                                         nt::app::ProjectSession& session,
+                                        nt::modplay::ModulePlayer& module_player,
+                                        nt::ui::ModuleView& module_view,
                                         nt::platform::AppWindow& window, ShellState& shell,
                                         WindowVisibility& vis, bool& reset_layout) {
     // Last-used project path, shared by open/save/save-as (previously
     // the shell window's path box).
     static std::array<char, 512> project_path{};
+    // Dedicated buffers so the import path and the disambiguation choice
+    // survive the frames between the dialog closing and the modal.
+    static std::array<char, 512> import_path{};
+    static std::array<char, 512> module_pending{};
     bool want_open_dialog = false;
     bool want_save_dialog = false;
+    bool want_import_dialog = false;
 
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("FILE")) {
@@ -429,6 +521,11 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             }
             if (ImGui::MenuItem("open...")) {
                 want_open_dialog = true;
+            }
+            // Explicit import entry: makes the (previously invisible)
+            // module → project pipeline discoverable next to the player.
+            if (ImGui::MenuItem("import module...")) {
+                want_import_dialog = true;
             }
             ImGui::Separator();
             // "save" reuses the last path and falls through to the
@@ -470,10 +567,11 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             ImGui::MenuItem("piano roll", nullptr, &vis.piano_roll);
             ImGui::MenuItem("workspace", nullptr, &vis.workspace);
             ImGui::MenuItem("FX MIXER", nullptr, &vis.fx_mixer);
-            ImGui::MenuItem("MODULE", nullptr, &vis.module);
+            ImGui::MenuItem("MODULE PLAYER", nullptr, &vis.module);
             ImGui::MenuItem("SAMPLES", nullptr, &vis.samples);
             ImGui::MenuItem("INSTRUMENTS", nullptr, &vis.instruments);
             ImGui::MenuItem("SAMPLE BROWSER", nullptr, &vis.sample_browser);
+            ImGui::MenuItem("NOTE ENTRY", nullptr, &vis.note_entry);
             ImGui::MenuItem("midi", nullptr, &vis.midi);
             ImGui::MenuItem("LOCAL API", nullptr, &vis.local_api);
             ImGui::MenuItem("EXPORT", nullptr, &shell.show_export);
@@ -563,11 +661,29 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
     if (want_save_dialog) {
         ImGui::OpenPopup("save project as");
     }
+    if (want_import_dialog) {
+        ImGui::OpenPopup("import module");
+    }
+    // open... : native projects load directly; a module extension asks
+    // once how to open (import vs player).
     if (draw_path_dialog("open project", "open", project_path)) {
-        if (!session.load_file(project_path.data())) {
+        if (is_module_path(project_path.data())) {
+            std::snprintf(module_pending.data(), module_pending.size(), "%s", project_path.data());
+            ImGui::OpenPopup("open module");
+        } else if (!session.load_file(project_path.data())) {
             std::fprintf(stderr, "load: %s\n", session.error().c_str());
         }
     }
+    // import module... : always routes the importer, then reports.
+    if (draw_path_dialog("import module", "import", import_path)) {
+        if (!session.load_file(import_path.data())) {
+            std::fprintf(stderr, "import: %s\n", session.error().c_str());
+        } else {
+            capture_import_report(shell, session);
+        }
+    }
+    draw_module_choice_modal("open module", module_pending.data(), audio, session, module_player,
+                             module_view, shell);
     if (draw_path_dialog("save project as", "save", project_path)) {
         if (!session.save_ftrk(project_path.data())) {
             std::fprintf(stderr, "save: %s\n", session.error().c_str());
@@ -610,10 +726,11 @@ void build_dock_layout(ImGuiID dockspace_id) {
     ImGui::DockBuilderDockWindow("piano roll", center);
     ImGui::DockBuilderDockWindow("workspace", center);
     ImGui::DockBuilderDockWindow("FX MIXER", center);
-    ImGui::DockBuilderDockWindow("MODULE", center);
+    ImGui::DockBuilderDockWindow("MODULE PLAYER", center);
     ImGui::DockBuilderDockWindow("SAMPLES", bottom);
     ImGui::DockBuilderDockWindow("INSTRUMENTS", bottom);
     ImGui::DockBuilderDockWindow("SAMPLE BROWSER", bottom);
+    ImGui::DockBuilderDockWindow("NOTE ENTRY", bottom);
     ImGui::DockBuilderDockWindow("midi", right);
     ImGui::DockBuilderDockWindow("LOCAL API", right);
     ImGui::DockBuilderDockWindow("EXPORT", right);
@@ -745,6 +862,7 @@ int main(int argc, char** argv) {
         nt::ui::ModuleView module_view;
         nt::ui::WorkspaceView workspace_view;
         nt::ui::PianoRollView piano_roll_view;
+        nt::ui::NoteEntryView note_entry_view;
         nt::ui::ExportView export_view(nt::platform::config_dir() / "export_presets.json");
         nt::midi::MidiInput midi_input;
         nt::midi::MidiOutputPort midi_output;
@@ -977,8 +1095,8 @@ int main(int argc, char** argv) {
             nt::platform::ImGuiHost::begin_frame();
             // Menu first (it can arm a dock rebuild), then the rebuild,
             // then the dockspace submits and picks the nodes up.
-            theme = draw_main_menu_bar(theme, settings, audio, session, window, shell, vis,
-                                       rebuild_dock_layout);
+            theme = draw_main_menu_bar(theme, settings, audio, session, module_player, module_view,
+                                       window, shell, vis, rebuild_dock_layout);
             if (rebuild_dock_layout) {
                 rebuild_dock_layout = false;
                 build_dock_layout(dockspace_id);
@@ -1006,6 +1124,7 @@ int main(int argc, char** argv) {
             }
             draw_help_window(shell);
             draw_licence_window(shell);
+            draw_import_report_window(shell);
             if (vis.debug) {
                 draw_debug_window(audio, vis.debug);
             }
@@ -1014,6 +1133,11 @@ int main(int argc, char** argv) {
                                          .count());
             if (vis.pattern) {
                 pattern_view.draw(session, audio.snapshot(), *theme);
+            }
+            // After the pattern view so the panel reads the cursor state
+            // it cached this frame (the PatternCursor contract).
+            if (vis.note_entry) {
+                note_entry_view.draw(session, pattern_view, midi_record, *theme);
             }
             if (vis.module) {
                 module_view.draw(audio, module_player, *theme);
@@ -1038,7 +1162,7 @@ int main(int argc, char** argv) {
                 workspace_view.draw(session, settings, *theme);
             }
             if (vis.piano_roll) {
-                piano_roll_view.draw(session, *theme);
+                piano_roll_view.draw(session, settings, *theme);
             }
             // The midi window's draw owns the device-ring drain
             // (ui/midi_view.h), so hiding it also pauses device MIDI

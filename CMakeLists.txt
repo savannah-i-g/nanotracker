@@ -335,6 +335,7 @@ add_executable(nanotracker
     src/ui/fx_mixer_view.cpp
     src/ui/instrument_table_view.cpp
     src/ui/local_api_view.cpp
+    src/ui/note_entry_view.cpp
     src/ui/pattern_view.cpp
     src/ui/sample_browser_view.cpp
     src/ui/sample_view.cpp

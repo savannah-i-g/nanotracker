@@ -19,6 +19,7 @@
 #pragma once
 
 #include "app/project_session.h"
+#include "io/settings.h"
 #include "ui/theme.h"
 
 #include <cstdint>
@@ -30,12 +31,19 @@ namespace nt::ui {
 
 class PianoRollView {
 public:
-    void draw(app::ProjectSession& session, const Theme& theme);
+    void draw(app::ProjectSession& session, io::Settings& settings, const Theme& theme);
 
 private:
+    // Editing mode chosen in the toolbar. Select drives the marquee /
+    // move / resize gestures; add turns an empty-space press into a
+    // drawn note (drag sets its duration). Note-body/edge gestures and
+    // right-click removal work in both.
+    enum class Mode : std::uint8_t { kSelect, kAdd };
+
     // Grid mouse gesture; decided at press, resolved at release. A
-    // stationary marquee doubles as the click gesture (clear / add).
-    enum class Drag : std::uint8_t { kNone, kMarquee, kMove, kResize };
+    // stationary marquee doubles as the select-mode empty click (clear);
+    // kDraw is the add-mode note draw (click or drag-with-duration).
+    enum class Drag : std::uint8_t { kNone, kMarquee, kMove, kResize, kDraw };
 
     // A note tagged with its post-edit selection membership;
     // replace_notes re-sorts by start tick and rebuilds selection_
@@ -68,8 +76,20 @@ private:
     void draw_toolbox(app::ProjectSession& session, int pattern_index,
                       const engine::SequenceLayer* layer, int ticks_per_row);
 
+    // The mode / layer / audition / transport toolbar; sets channel_,
+    // layer_, mode_ and the audition toggle. `pattern_index` scopes the
+    // per-layer note-presence readout.
+    void draw_toolbar(app::ProjectSession& session, io::Settings& settings, int pattern_index,
+                      const Theme& theme);
+
+    // Auditions `pitch` through the layer's instrument (sample or plugin
+    // alike) — the add-on-click preview when the toolbar toggle is on.
+    void audition_pitch(app::ProjectSession& session, const engine::SequenceLayer* layer,
+                        int pitch) const;
+
     int channel_ = 0;
     int layer_ = 0;
+    Mode mode_ = Mode::kSelect;
     int base_pitch_ = 56; // bottom row of the grid
     int keyboard_note_down_ = -1;
 
