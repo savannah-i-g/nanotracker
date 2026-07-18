@@ -30,6 +30,7 @@ public:
     int slot = 1;
     int rows = 64;
     int advances = 0;
+    int last_note = 0;
 
     [[nodiscard]] int step_pattern() const override { return pattern; }
 
@@ -43,6 +44,8 @@ public:
         row = std::min(rows - 1, row + 1);
         ++advances;
     }
+
+    void step_set_last_note(int note) override { last_note = note; }
 };
 
 int find_port(const std::vector<std::string>& names, const std::string& needle) {
@@ -88,6 +91,22 @@ TEST_CASE("record quantisation snaps events to the nearest row", "[midi_record]"
     anchor.tick = 5;
     CHECK(nt::app::quantise_record_row(anchor, 1'000'000 + 500) == 0);
 
+    // Sub-tick remainder: the snapshot published 800 frames into tick 0
+    // of row 4, so the true (row, tick) edge sits at stream - 800. The
+    // quantiser anchors there instead of at the publish instant.
+    anchor.row = 4;
+    anchor.tick = 0;
+    anchor.tick_frame_remainder = 800; // tick edge at 999'200
+    // At the publish instant the playhead is really 800 frames into the
+    // row (4.139), still row 4.
+    CHECK(nt::app::quantise_record_row(anchor, 1'000'000) == 4);
+    // 2000 frames later: 2800 frames into the row (4.486) — still row 4.
+    CHECK(nt::app::quantise_record_row(anchor, 1'000'000 + 2000) == 4);
+    // 2100 frames later: 2900 frames in (4.503) crosses the midpoint —
+    // row 5. Without the remainder this read only 2100 frames in (4.365)
+    // and landed on row 4: the old early read, now exact.
+    CHECK(nt::app::quantise_record_row(anchor, 1'000'000 + 2100) == 5);
+
     // Guard inputs return the anchor row.
     anchor.row = 7;
     anchor.tick = 0;
@@ -112,6 +131,9 @@ TEST_CASE("step entry writes the keyboard path and advances the cursor", "[midi_
     record.on_device_note_on(session, 60, 100);
     CHECK(cursor.row == 6);
     CHECK(cursor.advances == 1);
+    // Step entry updates the panel's last-note readout, like the
+    // keyboard path (tracker note, not the raw MIDI number).
+    CHECK(cursor.last_note == 49);
 
     // The keyboard path's write for the same note at another row (the
     // exact call ui::PatternView makes for C-4 with slot 2).

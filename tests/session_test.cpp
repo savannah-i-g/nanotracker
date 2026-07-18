@@ -16,10 +16,10 @@
 
 namespace {
 
-// Minimal 16-bit mono WAV with a 440 Hz sine.
-std::filesystem::path write_test_wav() {
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "nt_session_test.wav";
+// Minimal 16-bit mono WAV with a 440 Hz sine. `name` keeps concurrent
+// ctest processes off each other's temp files.
+std::filesystem::path write_test_wav(const char* name = "nt_session_test.wav") {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
     constexpr std::uint32_t kRate = 22050;
     constexpr std::uint32_t kFrames = 2205;
     std::vector<std::uint8_t> bytes;
@@ -296,4 +296,48 @@ TEST_CASE("pattern/order structural edits stay consistent under a live engine",
 
     session.stop();
     audio.stop();
+}
+
+TEST_CASE("session preview_file auditions through the reclamation fence", "[session][preview]") {
+    const std::filesystem::path wav = write_test_wav("nt_session_preview.wav");
+    // Offline engine so the fence advances deterministically: each
+    // render pull drains the preview command and republishes the serial.
+    nt::audio::AudioEngine audio;
+    REQUIRE(audio.start_offline(48000));
+    nt::app::ProjectSession session(audio);
+    std::vector<float> block(256, 0.0F);
+    const auto pump = [&] {
+        for (int i = 0; i < 4; ++i) {
+            audio.render_offline(block.data(), 128);
+        }
+    };
+    pump(); // apply the session's construction publish
+
+    // First audition decodes and holds the buffer; nothing to retire.
+    REQUIRE(session.preview_file(wav));
+    REQUIRE(session.preview_buffer() != nullptr);
+    CHECK(session.reclaimer().retired_count() == 0);
+    pump();
+    session.sweep_retired();
+    CHECK(session.reclaimer().freed_count() == 0);
+
+    // Replacing the audition retires the first buffer behind the fence;
+    // once the engine proves the serial, the sweep frees exactly it.
+    REQUIRE(session.preview_file(wav));
+    CHECK(session.reclaimer().retired_count() == 1);
+    pump();
+    session.sweep_retired();
+    CHECK(session.reclaimer().freed_count() == 1);
+
+    // Clearing the preview retires the second buffer the same way — no
+    // process-lifetime cache survives.
+    session.stop_preview();
+    CHECK(session.preview_buffer() == nullptr);
+    CHECK(session.reclaimer().retired_count() == 2);
+    pump();
+    session.sweep_retired();
+    CHECK(session.reclaimer().freed_count() == 2);
+
+    audio.stop();
+    std::filesystem::remove(wav);
 }

@@ -1,17 +1,20 @@
-// FTRK v14 writer verification: a project exercising every block
+// FTRK v15 writer verification: a project exercising every block
 // (cells with bound slots, samples with payloads, FX strips +
 // automation, instrument table + BNDT, sequence layers + channel
 // colors, WPBR workspace JSON, PLGB archives, PPRS presets, POVR
-// passthrough, XPLG external state) writes and reads back equal.
+// passthrough, XPLG external state, XINS per-instance NTP state) writes
+// and reads back equal.
 #include "engine/tracker_engine.h"
 #include "io/ftrk_reader.h"
 #include "io/ftrk_writer.h"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
-TEST_CASE("ftrk v14 round-trips every block", "[ftrk]") {
+TEST_CASE("ftrk v15 round-trips every block", "[ftrk]") {
     nt::engine::TrackerProject project = nt::engine::create_project(4);
     project.name = "ROUNDTRIP";
     project.bpm = 140;
@@ -107,6 +110,19 @@ TEST_CASE("ftrk v14 round-trips every block", "[ftrk]") {
     external.params = {{1, 0.5}, {7, 0.25}};
     extras.external.push_back(external);
 
+    // XINS per-instance NTP state: an envelope-stage override and a
+    // native_stage chunk, plus an instance carrying only a chunk.
+    nt::io::FtrkInstanceState state;
+    state.workspace_id = "plg-1";
+    state.env_stages = {{.node_id = "env", .stage_index = 1, .target = 0.6, .time = 0.25},
+                        {.node_id = "env", .stage_index = 0, .target = 1.0, .time = 0.001}};
+    state.stage_chunks = {{.node_id = "drv", .chunk = {0xDE, 0xAD, 0xBE, 0xEF}}};
+    extras.instance_states.push_back(state);
+    nt::io::FtrkInstanceState state2;
+    state2.workspace_id = "plg-2";
+    state2.stage_chunks = {{.node_id = "shaper", .chunk = {0x01}}};
+    extras.instance_states.push_back(state2);
+
     const std::vector<std::uint8_t> bytes = nt::io::write_ftrk(project, extras);
     std::string error;
     auto result = nt::io::read_ftrk(bytes.data(), bytes.size(), error);
@@ -114,7 +130,7 @@ TEST_CASE("ftrk v14 round-trips every block", "[ftrk]") {
     REQUIRE(result.has_value());
 
     const nt::engine::TrackerProject& loaded = result->project;
-    CHECK(result->extras.version == 14);
+    CHECK(result->extras.version == 15);
     CHECK(loaded.name == "ROUNDTRIP");
     CHECK(loaded.bpm == 140);
     CHECK(loaded.speed == 5);
@@ -175,4 +191,39 @@ TEST_CASE("ftrk v14 round-trips every block", "[ftrk]") {
     CHECK(result->extras.external[0].state == std::vector<std::uint8_t>({0xAA, 0xBB, 0xCC}));
     REQUIRE(result->extras.external[0].params.size() == 2);
     CHECK(result->extras.external[0].params[1].second == 0.25);
+
+    REQUIRE(result->extras.instance_states.size() == 2);
+    const auto& s0 = result->extras.instance_states[0];
+    CHECK(s0.workspace_id == "plg-1");
+    REQUIRE(s0.env_stages.size() == 2);
+    CHECK(s0.env_stages[0].node_id == "env");
+    CHECK(s0.env_stages[0].stage_index == 1);
+    CHECK(s0.env_stages[0].target == 0.6);
+    CHECK(s0.env_stages[0].time == 0.25);
+    CHECK(s0.env_stages[1].stage_index == 0);
+    REQUIRE(s0.stage_chunks.size() == 1);
+    CHECK(s0.stage_chunks[0].node_id == "drv");
+    CHECK(s0.stage_chunks[0].chunk == std::vector<std::uint8_t>({0xDE, 0xAD, 0xBE, 0xEF}));
+    const auto& s1 = result->extras.instance_states[1];
+    CHECK(s1.workspace_id == "plg-2");
+    CHECK(s1.env_stages.empty());
+    REQUIRE(s1.stage_chunks.size() == 1);
+    CHECK(s1.stage_chunks[0].chunk == std::vector<std::uint8_t>({0x01}));
+}
+
+TEST_CASE("ftrk v15 without the XINS block reads back clean", "[ftrk]") {
+    // A project with no per-instance state omits the block entirely
+    // (offset 0); the reader must load it with an empty instance_states
+    // list — the back-compatibility contract for files predating XINS.
+    nt::engine::TrackerProject project = nt::engine::create_project(2);
+    project.name = "NOXINS";
+    nt::io::FtrkWriteExtras extras; // instance_states empty
+    const std::vector<std::uint8_t> bytes = nt::io::write_ftrk(project, extras);
+    std::string error;
+    auto result = nt::io::read_ftrk(bytes.data(), bytes.size(), error);
+    INFO(error);
+    REQUIRE(result.has_value());
+    CHECK(result->extras.version == 15);
+    CHECK(result->extras.instance_states.empty());
+    CHECK(result->project.name == "NOXINS");
 }

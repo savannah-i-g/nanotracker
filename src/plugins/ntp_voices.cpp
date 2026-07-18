@@ -38,7 +38,7 @@ float block_average(const float* stereo, std::uint32_t frames) {
 
 } // namespace
 
-NtpInstance::NtpInstance(LoadedNtpPlugin& plugin, std::uint32_t rate)
+NtpInstance::NtpInstance(const LoadedNtpPlugin& plugin, std::uint32_t rate)
     : plugin_(&plugin), rate_(rate),
       is_instrument_(plugin.manifest.type == ntp::PluginType::kInstrument) {
     const ntp::Manifest& manifest = plugin.manifest;
@@ -324,19 +324,55 @@ float NtpInstance::node_peak(const std::string& node_id) const {
 
 bool NtpInstance::set_env_stage(const std::string& node_id, int stage_index, double target,
                                 double time) {
-    for (ntp::DspNode& node : plugin_->manifest.graph.nodes) {
+    // Validate against the shared manifest (type + stage count) without
+    // mutating it.
+    const ntp::DspNode* def = nullptr;
+    for (const ntp::DspNode& node : plugin_->manifest.graph.nodes) {
+        if (node.id == node_id && node.type == ntp::NodeType::kEnvelope) {
+            def = &node;
+            break;
+        }
+    }
+    if (def == nullptr || stage_index < 0 ||
+        stage_index >= static_cast<int>(def->env_stages.size())) {
+        return false;
+    }
+    const double clamped_target = std::clamp(target, 0.0, 1.0);
+    const double clamped_time = std::max(0.001, time);
+    // Record the per-instance override (keeping the manifest's other
+    // stage fields, e.g. exponential) for the writer.
+    ntp::EnvelopeStage override_stage = def->env_stages[static_cast<std::size_t>(stage_index)];
+    override_stage.target = clamped_target;
+    override_stage.time = clamped_time;
+    env_overrides_[node_id][stage_index] = override_stage;
+    // Push it into every voice runtime of the node (voice-scoped
+    // envelopes hold one runtime per pool voice).
+    const int index = node_index_by_id(node_id);
+    if (index >= 0) {
+        for (NodeInstantiation& slot : nodes_[static_cast<std::size_t>(index)].slots) {
+            slot.runtime->set_env_stage(stage_index, clamped_target, clamped_time);
+        }
+    }
+    return true;
+}
+
+std::vector<ntp::EnvelopeStage>
+NtpInstance::effective_env_stages(const std::string& node_id) const {
+    for (const ntp::DspNode& node : plugin_->manifest.graph.nodes) {
         if (node.id != node_id || node.type != ntp::NodeType::kEnvelope) {
             continue;
         }
-        if (stage_index < 0 || stage_index >= static_cast<int>(node.env_stages.size())) {
-            return false;
+        std::vector<ntp::EnvelopeStage> stages = node.env_stages;
+        if (const auto it = env_overrides_.find(node_id); it != env_overrides_.end()) {
+            for (const auto& [idx, stage] : it->second) {
+                if (idx >= 0 && idx < static_cast<int>(stages.size())) {
+                    stages[static_cast<std::size_t>(idx)] = stage;
+                }
+            }
         }
-        ntp::EnvelopeStage& stage = node.env_stages[static_cast<std::size_t>(stage_index)];
-        stage.target = std::clamp(target, 0.0, 1.0);
-        stage.time = std::max(0.001, time);
-        return true;
+        return stages;
     }
-    return false;
+    return {};
 }
 
 void NtpInstance::note_on(int note, float velocity) {

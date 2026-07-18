@@ -38,6 +38,8 @@ public:
 
     void step_advance() override { advance_cursor_down(active_rows_); }
 
+    void step_set_last_note(int note) override { last_note_ = note; }
+
     // ── Note-entry state (shared with ui/note_entry_view) ────────────
     // The grid owns the canonical entry state; the NOTE ENTRY panel is a
     // view onto it, so both edit the same octave/step/slot and read the

@@ -3,6 +3,44 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 25 closed — Debt paydown (cycle 3 opens)
+
+- Landed: **record quantise precision** — `EngineSnapshot` gains
+  `tick_frame_remainder` (frames since the tick edge, tracked via
+  `tick_edge_frames_`); the quantiser anchors on the true edge,
+  removing the up-to-one-tick early read at row boundaries
+  (snapshot-additive, golden RT path untouched). **Session
+  preview-file API** — `preview_file`/`stop_preview`/`preview_buffer`
+  decode at device rate, audition through the one-shot voice, and
+  retire behind the `sample_reclaim` fence (kPlaySample/kStopSample
+  now echo `command.serial`); the sample browser drops its
+  process-lifetime decode cache. **Per-instance state persistence** —
+  new additive **FTRK v15 XINS block** (reserved header 35→39):
+  envelope edits become per-INSTANCE overrides (NtpInstance override
+  table + per-runtime `env_stages_` copy read RT-safe; the shared
+  manifest is never mutated, fixing the plugin-wide-edit regression),
+  and native_stage ABI chunks persist. **MIDI last-note readout**
+  updates from MIDI step-entry (new `step_set_last_note`). Reader
+  accepts v1-15; files without XINS load unchanged.
+- Correctness fix on review (mine, over the agent's flagged judgment
+  call): native_stage `state_save` must never overlap `process()`
+  per our own frozen ABI, but the workspace graph runs every block
+  whenever the device is open (not gated on the transport), so a
+  running-device save (autosave fires on a timer mid-play) would race
+  a live stage. The save path now calls `state_save` only when the
+  device is idle and otherwise emits the last quiescent capture
+  (cached at load / device-idle save); limitation documented in
+  FIXES.md + ftrk-format.md, RT-coordinated capture recorded as the
+  future path. The frozen contract holds absolutely.
+- Verification: 142/142 both trees (+4: boundary-quantise with the
+  remainder, preview replace→sweep frees the prior buffer, env edit
+  round-trip with per-instance scope asserted + audible peak, and
+  native_stage chunk round-trip; the two Stage-20 envelope tests
+  reworked to assert per-instance rather than shared-manifest scope);
+  tidy clean in-file (only third-party VST3 SDK header noise, outside
+  the src gate); format clean.
+- Backup: `NanoTracker_stage25_2026-07-18.tar.gz`; git tag `stage-25`.
+
 ## 2026-07-18 — Stage 24 closed — DAW polish sweep + pattern/order editing; 1.1.0
 
 - Landed (owner priority): **pattern/order-list structure editing

@@ -101,9 +101,16 @@ void AudioEngine::drain_commands() {
         case Command::Type::kPlaySample:
             voice_sample_ = command.sample;
             voice_pos_ = 0;
+            // Fenced senders (ProjectSession::preview_file) carry a
+            // publish serial: installing the new buffer unlinks the
+            // previous one, so echoing the serial lets the reclaimer
+            // free it (running max — the demo/CLI path sends serial 0
+            // and never rewinds the clock).
+            bundle_serial_ = std::max(bundle_serial_, command.serial);
             break;
         case Command::Type::kStopSample:
             voice_sample_ = nullptr;
+            bundle_serial_ = std::max(bundle_serial_, command.serial);
             break;
         case Command::Type::kSetBundle:
             bundle_ = command.bundle;
@@ -562,7 +569,7 @@ void AudioEngine::render_voices_span(std::uint32_t offset, std::uint32_t frames)
     }
 }
 
-void AudioEngine::advance_transport_in_block(std::uint32_t frames) {
+void AudioEngine::advance_transport_in_block(std::uint32_t frames, std::uint64_t block_start) {
     // Tick boundaries computed in frames: interval = rate * 2.5 / bpm.
     // A block spanning a boundary is split so triggers land
     // sample-accurately.
@@ -580,6 +587,9 @@ void AudioEngine::advance_transport_in_block(std::uint32_t frames) {
                 play_state_.song_ended = true;
                 transport_playing_ = false;
             } else {
+                // Stamp this tick's edge in absolute stream frames so the
+                // snapshot can publish the sub-tick remainder.
+                tick_edge_frames_ = block_start + offset;
                 handle_tick_outputs(offset);
                 frames_until_tick_ += static_cast<double>(sample_rate_) * 2.5 / play_state_.bpm;
             }
@@ -646,6 +656,10 @@ void AudioEngine::render(float* interleaved, std::uint32_t frames) {
     snap.tick = play_state_.tick;
     snap.bpm = play_state_.bpm;
     snap.speed = play_state_.speed;
+    // Sub-tick remainder: frames from the current tick's edge to the end
+    // of this pull. tick_edge_frames_ is always at or before the total
+    // (the edge is in the past), so the subtraction never wraps.
+    snap.tick_frame_remainder = static_cast<std::uint32_t>(stream_frames_ - tick_edge_frames_);
     snapshot_.publish();
 }
 
@@ -697,7 +711,7 @@ void AudioEngine::render_block(float* interleaved, std::uint32_t frames,
     }
     std::fill_n(seq_scratch_.data(), static_cast<std::size_t>(frames) * 2, 0.0F);
     if (transport_playing_ && bundle_ != nullptr && bundle_->project != nullptr) {
-        advance_transport_in_block(frames);
+        advance_transport_in_block(frames, block_start);
     } else {
         render_voices_span(0, frames);
         render_seq_voices_span(0, frames); // tails after stop / previews

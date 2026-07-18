@@ -53,10 +53,10 @@ struct SlotOverride {
 
 class NtpInstance final : public audio::GraphPluginBinding {
 public:
-    // Non-const plugin: set_env_stage writes the manifest's envelope
-    // stage arrays in place (the one sanctioned mutation — everything
-    // else reads).
-    NtpInstance(LoadedNtpPlugin& plugin, std::uint32_t rate);
+    // The manifest is read-only to the instance: envelope edits are
+    // per-instance overrides (set_env_stage), never manifest mutations,
+    // so plugins stay shareable across instances.
+    NtpInstance(const LoadedNtpPlugin& plugin, std::uint32_t rate);
 
     NtpInstance(const NtpInstance&) = delete;
     NtpInstance& operator=(const NtpInstance&) = delete;
@@ -109,15 +109,30 @@ public:
     // Peak of a node's last output block (meter controls).
     [[nodiscard]] float node_peak(const std::string& node_id) const;
 
-    // Writes one envelope stage point on the owning plugin's manifest
-    // node (the envelope-editor commit). Clamps to target 0..1 and
-    // time ≥ 1 ms. Only inside the session's structural stop→publish
-    // window: NodeRuntimes — across every instance of this plugin id,
-    // the manifest is shared — read the stage array in place, so the
-    // caller must fence the write exactly like a sequence-note edit
-    // (ProjectSession::set_plugin_env_stage). Returns false when the
-    // node is not an envelope or the stage index is out of range.
+    // Writes one envelope stage point as a PER-INSTANCE override (the
+    // envelope-editor commit). Clamps to target 0..1 and time ≥ 1 ms.
+    // The write lands on this instance's own stage copies (every voice
+    // runtime of the node) plus the override table below — the shared
+    // manifest is untouched, so sibling instances of the same plugin id
+    // keep their curves (Stage 20's plugin-wide edit is gone; FIXES.md).
+    // Voice runtimes read the copy in place, so the caller fences the
+    // write like a sequence-note edit (ProjectSession::set_plugin_env_stage).
+    // Returns false when the node is not an envelope or the stage index
+    // is out of range.
     bool set_env_stage(const std::string& node_id, int stage_index, double target, double time);
+
+    // Node id → (stage index → overridden stage). The XINS serialiser
+    // reads this; empty when the instance carries no envelope edits.
+    [[nodiscard]] const std::map<std::string, std::map<int, ntp::EnvelopeStage>>&
+    env_overrides() const {
+        return env_overrides_;
+    }
+
+    // The node's manifest stage array with this instance's overrides
+    // applied — the curve the envelope editor draws. Empty when the
+    // node is not an envelope.
+    [[nodiscard]] std::vector<ntp::EnvelopeStage>
+    effective_env_stages(const std::string& node_id) const;
 
     // ── User sample slots (session thread) ───────────────────────────
     // Installs/clears an override for `slot_id` across every sampler
@@ -193,7 +208,7 @@ private:
     [[nodiscard]] NodeInstantiation& slot_for(int node_index, int voice_index);
     [[nodiscard]] int node_index_by_id(const std::string& id) const;
 
-    LoadedNtpPlugin* plugin_; // non-const for set_env_stage only
+    const LoadedNtpPlugin* plugin_; // manifest is read-only to the instance
     std::uint32_t rate_;
     bool is_instrument_;
 
@@ -227,6 +242,11 @@ private:
     // Session-thread override table; the audio thread only ever sees
     // the raw buffer pointers pushed into the sampler runtimes.
     std::map<std::string, SlotOverride> slot_overrides_;
+
+    // Per-instance envelope stage overrides (node id → stage index →
+    // stage). set_env_stage writes both this and the matching voice
+    // runtimes; the writer serialises it, the reader replays it.
+    std::map<std::string, std::map<int, ntp::EnvelopeStage>> env_overrides_;
 
     // Per host param: value range + the ParamSlot bases its dot-path
     // resolves to (empty for bare keys). Built at construction so

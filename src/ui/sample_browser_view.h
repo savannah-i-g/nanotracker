@@ -9,13 +9,10 @@
 #pragma once
 
 #include "app/project_session.h"
-#include "audio/audio_engine.h"
 #include "ui/theme.h"
 
 #include <cstdint>
 #include <filesystem>
-#include <map>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -25,13 +22,10 @@ class SampleBrowserView {
 public:
     SampleBrowserView();
 
-    // `audition_pool` is the app's process-lifetime sample registry:
-    // the engine keeps raw SampleBuffer pointers to auditioned files,
-    // so pool entries are never freed while it runs — the same
-    // ownership contract as the shell's load & play path (main.cpp).
-    void draw(app::ProjectSession& session, audio::AudioEngine& audio,
-              std::vector<std::unique_ptr<audio::SampleBuffer>>& audition_pool, int target_slot,
-              const Theme& theme);
+    // Audition routes through ProjectSession::preview_file — a
+    // reclaimer-backed decode-and-play, so the browser holds no sample
+    // buffers of its own (the process-lifetime audition pool is gone).
+    void draw(app::ProjectSession& session, int target_slot, const Theme& theme);
 
 private:
     struct Entry {
@@ -43,17 +37,13 @@ private:
 
     void navigate_to(const std::filesystem::path& dir);
     void refresh();
-    void audition(audio::AudioEngine& audio,
-                  std::vector<std::unique_ptr<audio::SampleBuffer>>& pool, const Entry& entry);
+    void audition(app::ProjectSession& session, const Entry& entry);
 
     std::filesystem::path dir_; // remembered across frames (in-memory only)
     std::vector<Entry> entries_;
     std::string list_error_;
     std::string status_;
     std::filesystem::path selected_;
-    // Path → decoded buffer inside the pool: each file decodes once per
-    // run (pointers stay valid because the pool never shrinks).
-    std::map<std::string, const audio::SampleBuffer*> decoded_;
     bool dirty_ = true; // listing needs a rescan
 };
 

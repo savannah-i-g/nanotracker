@@ -10,7 +10,7 @@ namespace nt::io {
 
 namespace {
 
-constexpr int kWriteVersion = 14;
+constexpr int kWriteVersion = 15;
 
 // Little-endian append helpers mirroring the reader's Cursor.
 struct Out {
@@ -108,10 +108,10 @@ std::vector<std::uint8_t> write_ftrk(const engine::TrackerProject& project,
     out.u16(static_cast<std::uint16_t>(project.order_list.size()));
     out.u8(static_cast<std::uint8_t>(project.samples.size()));
 
-    // Reserved region (v14: 35 bytes — eight u32 block offsets + 3
+    // Reserved region (v15: 39 bytes — nine u32 block offsets + 3
     // spare). Offsets patch in as blocks land.
     const std::size_t reserved_pos = out.bytes.size();
-    for (int i = 0; i < 35; ++i) {
+    for (int i = 0; i < 39; ++i) {
         out.u8(0);
     }
 
@@ -390,6 +390,30 @@ std::vector<std::uint8_t> write_ftrk(const engine::TrackerProject& project,
             for (const auto& [id, value] : external.params) {
                 out.u32(id);
                 out.f64(value);
+            }
+        }
+    }
+
+    // ── XINS (v15: per-instance NTP state) ───────────────────────────
+    if (!extras.instance_states.empty()) {
+        out.patch_u32(reserved_pos + 32, static_cast<std::uint32_t>(out.bytes.size()));
+        out.magic("XINS");
+        out.u8(1); // block version
+        out.u16(static_cast<std::uint16_t>(extras.instance_states.size()));
+        for (const FtrkInstanceState& state : extras.instance_states) {
+            out.str16(state.workspace_id);
+            out.u16(static_cast<std::uint16_t>(state.env_stages.size()));
+            for (const FtrkInstanceEnvStage& env : state.env_stages) {
+                out.str16(env.node_id);
+                out.u8(static_cast<std::uint8_t>(env.stage_index));
+                out.f64(env.target);
+                out.f64(env.time);
+            }
+            out.u16(static_cast<std::uint16_t>(state.stage_chunks.size()));
+            for (const FtrkInstanceStageChunk& chunk : state.stage_chunks) {
+                out.str16(chunk.node_id);
+                out.u32(static_cast<std::uint32_t>(chunk.chunk.size()));
+                out.blob(chunk.chunk);
             }
         }
     }

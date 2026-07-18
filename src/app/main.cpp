@@ -1164,12 +1164,11 @@ int main(int argc, char** argv) {
             if (vis.samples) {
                 sample_view.draw(session, *theme);
             }
-            // Auditioned files join `samples` (process-lifetime, same
-            // contract as load & play); loads target the slot selected
-            // in the SAMPLES window.
+            // Audition routes through the session's reclaimer-backed
+            // preview path; loads target the slot selected in the
+            // SAMPLES window.
             if (vis.sample_browser) {
-                sample_browser_view.draw(session, audio, samples, sample_view.selected_slot(),
-                                         *theme);
+                sample_browser_view.draw(session, sample_view.selected_slot(), *theme);
             }
             if (vis.instruments) {
                 nt::ui::InstrumentTableView::draw(session, *theme);

@@ -108,6 +108,23 @@ public:
     // audition). Resolves the sample the same way playback would.
     void preview_note(int channel, int slot, int note);
 
+    // ── File audition (sample browser / library) ─────────────────────
+    // Decodes `path` at the device rate and auditions it through the
+    // one-shot preview voice, replacing whatever was auditioning. The
+    // decode buffer is held on the session and retires behind the
+    // reclamation fence when the next preview replaces it or
+    // stop_preview() clears it (kPlaySample/kStopSample echo the publish
+    // serial) — a reclaimer-backed audition, not a process-lifetime
+    // cache. Returns false with error() set (audio stopped, unreadable
+    // or undecodable file). preview_buffer() exposes the current decode
+    // for a readout (null when nothing is auditioning).
+    bool preview_file(const std::filesystem::path& path);
+    void stop_preview();
+
+    [[nodiscard]] const audio::SampleBuffer* preview_buffer() const {
+        return preview_buffer_.get();
+    }
+
     // ── Pattern & order-list structure ───────────────────────────────
     // All structural: the transport stops and the bundle republishes,
     // because the audio thread reads patterns / order_list / seq_patterns
@@ -253,11 +270,13 @@ public:
     void set_plugin_param(const std::string& workspace_id, const std::string& key,
                           float value) const;
 
-    // Writes one envelope stage point (target/time) on a plugin's
-    // envelope node. Structural: voices read the stage array in place,
-    // so the transport stops and the bundle republishes — the same
-    // discipline as sequence-note edits. One call per completed drag
-    // (ui/ntp_ui previews locally until release). Values clamp to
+    // Writes one envelope stage point (target/time) as a PER-INSTANCE
+    // override on a plugin's envelope node (siblings of the same plugin
+    // id are unaffected; the edit persists in the FTRK XINS block).
+    // Structural: the instance's voice runtimes read the stage copy in
+    // place, so the transport stops and the bundle republishes — the
+    // same discipline as sequence-note edits. One call per completed
+    // drag (ui/ntp_ui previews locally until release). Values clamp to
     // target 0..1, time ≥ 1 ms. Returns false when the node/stage does
     // not resolve.
     bool set_plugin_env_stage(const std::string& workspace_id, const std::string& node_id,
@@ -420,8 +439,25 @@ private:
     // on the NtpInstances.
     std::vector<std::uint8_t> povr_raw_;
     std::vector<io::FtrkPovrOverride> povr_pending_;
+    // XINS per-instance state whose instance never resolved at load
+    // (missing plugin, foreign workspace id) — re-emitted on save so a
+    // load→save cycle loses nothing; resolved state lives on the
+    // instances and re-emits fresh.
+    std::vector<io::FtrkInstanceState> xins_pending_;
+    // Last native-stage chunk captured while the instance was provably
+    // quiescent (device not pulling). The ABI forbids state_save while
+    // process() may run, and the workspace graph is processed on every
+    // block whenever the device is open (independent of the transport),
+    // so a running-device save reads this cache instead of the live
+    // runtime. Keyed workspace id → node id → chunk.
+    std::map<std::string, std::map<std::string, std::vector<std::uint8_t>>>
+        native_stage_chunk_cache_;
     int preview_plugin_slot_ = 0;
     int preview_plugin_note_ = -1;
+    // Current file audition buffer (preview_file). Retired behind the
+    // reclamation fence when replaced or cleared — never a process-
+    // lifetime cache.
+    std::shared_ptr<audio::SampleBuffer> preview_buffer_;
 
     std::string error_;
     std::vector<std::string> load_warnings_;

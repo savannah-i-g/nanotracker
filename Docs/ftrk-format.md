@@ -3,9 +3,9 @@
 Normative description of the `.ftrk` project format as read and
 written by native NanoTracker. The web serializer
 (`Source/.../src/lib/trackerSerializer.ts`, `binarySerializer.ts`)
-defined versions 1-13; the native writer emits **version 14**, whose
-single addition is the XPLG block and a wider reserved header region.
-The native reader accepts 1-14.
+defined versions 1-13; the native writer emits **version 15**, adding
+the XPLG block (v14) and the XINS block (v15) with a wider reserved
+header region. The native reader accepts 1-15.
 
 All integers are **little-endian**. Fixed-width strings are
 zero-padded; readers trim at the first NUL. Length-prefixed strings
@@ -16,7 +16,7 @@ are `u8`/`u16`/`u32` byte counts followed by raw UTF-8.
 | Field | Type | Notes |
 | --- | --- | --- |
 | magic | 4 bytes | `FTRK` |
-| version | u16 | 14 written; 1-14 read |
+| version | u16 | 15 written; 1-15 read |
 | name | char[32] | project title |
 | bpm | f32 (v2+) / u16 (v1) | |
 | speed | u8 | ticks per row |
@@ -25,7 +25,7 @@ are `u8`/`u16`/`u32` byte counts followed by raw UTF-8.
 | patternCount | u8 | |
 | orderLength | u16 | |
 | sampleCount | u8 | |
-| reserved | 31 bytes (v2-13), **35 bytes (v14+)**, 35 bytes (v1) | block offsets below |
+| reserved | 31 bytes (v2-13), 35 bytes (v14), **39 bytes (v15+)**, 35 bytes (v1) | block offsets below |
 
 Block offsets inside the reserved region (u32 file offsets, 0 = block
 absent):
@@ -39,12 +39,13 @@ absent):
 | +16 | SEQB | v10 |
 | +20 | POVR | v12 |
 | +24 | PPRS | v13 |
-| +28 | XPLG | **v14** |
+| +28 | XPLG | v14 |
+| +32 | XINS | **v15** |
 
-The v14 region grew from 31 to 35 bytes to fit the eighth offset; the
-remaining 3 bytes stay reserved. Pre-v14 readers refuse the version
-loudly — the intended failure mode for files carrying features they
-cannot represent.
+The reserved region grew from 31 to 35 bytes (v14, eighth offset) to 39
+bytes (v15, ninth offset); the remaining 3 bytes stay reserved.
+Pre-v15 readers refuse the version loudly — the intended failure mode
+for files carrying features they cannot represent.
 
 ## Core sections (immediately after the header)
 
@@ -128,13 +129,32 @@ length + bytes + u32 controller-stream length + bytes), paramCount
 u16 × { id u32, value f64 } — the parameter snapshot for degraded
 restore when the plugin is missing on load.
 
+### XINS — per-instance NTP state (v15, native)
+`XINS`, blockVersion u8 (1), count u16; per NTP plugin instance:
+workspaceId str16, then envStageCount u16 × { nodeId str16, stageIndex
+u8, target f64, time f64 } (per-instance envelope-editor overrides on
+an `envelope` node) and stageChunkCount u16 × { nodeId str16, chunkLen
+u32 + bytes } (opaque `native_stage` ABI state chunks, `ntp_stage_abi.h`
+`state_save` output). WPBR's paramSnapshot carries plugin parameters;
+this block carries the state WPBR cannot express — envelope edits scope
+per instance (not the shared manifest) and native stages have no
+parameter view of their internal state. The native host applies each
+record to the matching live instance after instantiation; envelope
+overrides feed `NtpInstance::set_env_stage`, chunks feed
+`set_native_stage_state`. Records whose instance never resolves at load
+round-trip untouched. A `native_stage` chunk is written from a live
+capture only while the audio device is idle; a save taken while the
+device pulls emits the last quiescent capture, because the ABI forbids
+`state_save` from overlapping the `process()` the graph runs every
+block (see FIXES.md).
+
 ## Compatibility notes
 
-- The native writer always emits v14 with every block its project
+- The native writer always emits v15 with every block its project
   needs; blocks with nothing to say are omitted (offset 0).
 - Loop points and 9xx offsets are stored in **source-rate frames**
   (web compatibility); the native sampler converts to resident-buffer
   frames at voice trigger (FIXES.md #9).
-- The web reader will refuse v14 files by version check. Projects
+- The web reader will refuse v14/v15 files by version check. Projects
   meant for the web must come from the web; the native app is the
   format's forward home.

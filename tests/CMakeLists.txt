@@ -25,6 +25,7 @@ add_executable(nt_tests
     graph_test.cpp
     ntp_test.cpp
     ntp_stage_test.cpp
+    instance_state_test.cpp
     povr_session_test.cpp
     clap_host_test.cpp
     vst3_run_loop_test.cpp

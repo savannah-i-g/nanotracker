@@ -60,6 +60,17 @@ public:
         return v;
     }
 
+    // Little-endian f64 = low u32 then high u32 (the writer's f64
+    // layout; the XPLG parser open-codes the same split).
+    double f64() {
+        const std::uint64_t lo = u32();
+        const std::uint64_t hi = u32();
+        const std::uint64_t raw = lo | (hi << 32U);
+        double v = 0.0;
+        std::memcpy(&v, &raw, sizeof(v));
+        return v;
+    }
+
     // Fixed-size zero-terminated field (name fields).
     std::string fixed_string(std::size_t len) {
         need(len);
@@ -407,6 +418,47 @@ void parse_xplg(Cursor c, std::size_t offset, FtrkExtras& extras) {
     }
 }
 
+// XINS block version 1 (v15, native): count u16; per instance
+// { workspaceId str16, envStageCount u16 × { nodeId str16, stageIndex
+// u8, target f64, time f64 }, stageChunkCount u16 × { nodeId str16,
+// chunkLen u32 + bytes } }. Parsed whole then committed, so a
+// truncation mid-block adopts nothing.
+void parse_xins(Cursor c, std::size_t offset, FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "XINS")) {
+        extras.warnings.emplace_back("XINS: bad magic, block skipped");
+        return;
+    }
+    if (c.u8() != 1) {
+        extras.warnings.emplace_back("XINS: unsupported block version, skipped");
+        return;
+    }
+    std::vector<FtrkInstanceState> parsed;
+    const int count = c.u16();
+    for (int i = 0; i < count; ++i) {
+        FtrkInstanceState state;
+        state.workspace_id = c.bytes_string(c.u16());
+        const int env_count = c.u16();
+        for (int e = 0; e < env_count; ++e) {
+            FtrkInstanceEnvStage env;
+            env.node_id = c.bytes_string(c.u16());
+            env.stage_index = c.u8();
+            env.target = c.f64();
+            env.time = c.f64();
+            state.env_stages.push_back(std::move(env));
+        }
+        const int chunk_count = c.u16();
+        for (int ci = 0; ci < chunk_count; ++ci) {
+            FtrkInstanceStageChunk chunk;
+            chunk.node_id = c.bytes_string(c.u16());
+            chunk.chunk = c.bytes(c.u32());
+            state.stage_chunks.push_back(std::move(chunk));
+        }
+        parsed.push_back(std::move(state));
+    }
+    extras.instance_states = std::move(parsed);
+}
+
 template <typename Fn>
 void tolerant(FtrkExtras& extras, const char* block, Fn&& fn) {
     try {
@@ -431,8 +483,8 @@ std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t si
             return std::nullopt;
         }
         const int version = c.u16();
-        if (version < 1 || version > 14) {
-            error = "unsupported .ftrk version " + std::to_string(version) + " (supported: 1-14)";
+        if (version < 1 || version > 15) {
+            error = "unsupported .ftrk version " + std::to_string(version) + " (supported: 1-15)";
             return std::nullopt;
         }
         extras.version = version;
@@ -455,9 +507,15 @@ std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t si
         const std::uint32_t povr_offset = version >= 12 ? (c.seek(reserved_pos + 20), c.u32()) : 0;
         const std::uint32_t pprs_offset = version >= 13 ? (c.seek(reserved_pos + 24), c.u32()) : 0;
         const std::uint32_t xplg_offset = version >= 14 ? (c.seek(reserved_pos + 28), c.u32()) : 0;
-        // Reserved region: 35 bytes in v1 and again from v14 (grown to
-        // fit the XPLG offset); 31 bytes across v2-13.
-        const std::size_t reserved_len = version >= 2 && version < 14 ? 31 : 35;
+        const std::uint32_t xins_offset = version >= 15 ? (c.seek(reserved_pos + 32), c.u32()) : 0;
+        // Reserved region: 39 bytes from v15 (ninth offset, XINS), 35 in
+        // v1 and v14 (XPLG), 31 across v2-13.
+        std::size_t reserved_len = 35; // v1 and v14
+        if (version >= 15) {
+            reserved_len = 39;
+        } else if (version >= 2 && version < 14) {
+            reserved_len = 31;
+        }
         c.seek(reserved_pos + reserved_len);
 
         for (int i = 0; i < order_length; ++i) {
@@ -578,6 +636,9 @@ std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t si
         }
         if (in_range(xplg_offset)) {
             tolerant(extras, "XPLG", [&] { parse_xplg(Cursor(data, size), xplg_offset, extras); });
+        }
+        if (in_range(xins_offset)) {
+            tolerant(extras, "XINS", [&] { parse_xins(Cursor(data, size), xins_offset, extras); });
         }
     } catch (const TruncatedError&) {
         error = "truncated .ftrk file";

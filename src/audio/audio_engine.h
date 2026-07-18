@@ -74,6 +74,13 @@ struct EngineSnapshot {
     // between snapshots (midi/midi_out_thread.h).
     std::uint64_t stream_frames = 0;
     double host_time_seconds = 0.0;
+    // Frames elapsed since the current tick's edge, at publish time
+    // (0 = the publish landed exactly on the tick boundary). The record
+    // quantiser (app/midi_record.h) subtracts this from stream_frames to
+    // recover the frame the (row, tick) above actually began — without
+    // it the anchor reads up to one tick early near row boundaries.
+    // Valid while transport_playing.
+    std::uint32_t tick_frame_remainder = 0;
 };
 
 // POD command set (SpscQueue requires trivially copyable). Sample and
@@ -85,8 +92,13 @@ struct Command {
         kToneOn,
         kToneOff,
         kToneFreq,
-        kPlaySample,
-        kStopSample,
+        kPlaySample,     // one-shot preview voice = sample. serial (when
+                         // non-zero) fences the buffer it replaces:
+                         // ProjectSession::preview_file retires the old
+                         // preview buffer at this serial and the engine
+                         // echoes it into bundle_serial (sample_reclaim.h).
+        kStopSample,     // clears the one-shot preview voice; serial
+                         // fences the retired preview buffer as above.
         kSetBundle,      // bundle = new playback bundle (or null to
                          // clear). Deactivates every voice class that
                          // holds a SampleBuffer* (channel, sequence-
@@ -223,7 +235,9 @@ private:
     // frame position inside the current block — the stamp for the
     // channel midi events this tick emits.
     void handle_tick_outputs(std::uint32_t frame_offset);
-    void advance_transport_in_block(std::uint32_t frames);
+    // `block_start` is this block's absolute stream frame, so each tick
+    // edge is stamped in stream-frame terms (tick_edge_frames_).
+    void advance_transport_in_block(std::uint32_t frames, std::uint64_t block_start);
     // Renders active voices into channel scratch at `offset` frames
     // into the block. Dry mix / FX / graph happen once per block in
     // render_block, after all spans have rendered.
@@ -248,6 +262,10 @@ private:
     engine::TrackerPlayState play_state_{};
     bool transport_playing_ = false;
     double frames_until_tick_ = 0.0;
+    // Absolute stream frame of the current tick's edge (updated each
+    // time a tick fires). stream_frames_ minus this is the sub-tick
+    // remainder the snapshot publishes for the record quantiser.
+    std::uint64_t tick_edge_frames_ = 0;
     // ── Tracker-bus MIDI production ──────────────────────────────────
     // Per-channel row events for the current block (note on/off + the
     // effect→MIDI translation), frame-stamped at tick offsets; the

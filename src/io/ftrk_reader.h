@@ -1,13 +1,13 @@
-// io/ftrk_reader — reads .ftrk project files, versions 1 through 13.
+// io/ftrk_reader — reads .ftrk project files, versions 1 through 15.
 // Normative reference for the format: the web serializer
 // (Source/.../src/lib/trackerSerializer.ts); the native writer and the
 // standalone spec Docs/ftrk-format.md derive from the same layout.
 //
 // Read philosophy (mirrors the web app): the core sections (header,
 // order list, patterns, samples) fail loudly on corruption; the
-// appended blocks (FXMX, INTB, WPBR, PLGB, SEQB, POVR, PPRS) are
-// individually tolerant — a damaged block is reported and skipped, the
-// song still loads.
+// appended blocks (FXMX, INTB, WPBR, PLGB, SEQB, POVR, PPRS, XPLG,
+// XINS) are individually tolerant — a damaged block is reported and
+// skipped, the song still loads.
 #pragma once
 
 #include "engine/tracker_types.h"
@@ -74,6 +74,32 @@ struct FtrkExternalPlugin {
     std::vector<std::pair<std::uint32_t, double>> params;
 };
 
+// Per-instance NTP state (XINS entry, v15). One record per plugin
+// instance that carries envelope-stage overrides and/or native_stage
+// ABI state chunks — the state WPBR's paramSnapshot cannot express.
+// `env_stages` are per-instance envelope-editor edits (node id + stage
+// index + the overridden target/time); `stage_chunks` are opaque
+// native_stage chunks keyed by node id (ntp_stage_abi.h state_save
+// output). Applied to live instances after instantiation; unresolved
+// records round-trip untouched.
+struct FtrkInstanceEnvStage {
+    std::string node_id;
+    int stage_index = 0;
+    double target = 0.0;
+    double time = 0.0;
+};
+
+struct FtrkInstanceStageChunk {
+    std::string node_id;
+    std::vector<std::uint8_t> chunk;
+};
+
+struct FtrkInstanceState {
+    std::string workspace_id;
+    std::vector<FtrkInstanceEnvStage> env_stages;
+    std::vector<FtrkInstanceStageChunk> stage_chunks;
+};
+
 // Everything in the file that is not (yet) part of the engine project:
 // carried so later stages and the writer can round-trip it.
 struct FtrkExtras {
@@ -88,9 +114,10 @@ struct FtrkExtras {
     // interpret. Exactly one of the two is populated.
     std::vector<FtrkPovrOverride> povr_overrides;
     std::vector<std::uint8_t> povr_raw;
-    std::string pprs_json;                    // PPRS payload (v13+)
-    std::vector<FtrkExternalPlugin> external; // XPLG entries (v14+)
-    std::vector<std::string> warnings;        // skipped-block reports
+    std::string pprs_json;                          // PPRS payload (v13+)
+    std::vector<FtrkExternalPlugin> external;       // XPLG entries (v14+)
+    std::vector<FtrkInstanceState> instance_states; // XINS entries (v15+)
+    std::vector<std::string> warnings;              // skipped-block reports
 };
 
 struct FtrkReadResult {

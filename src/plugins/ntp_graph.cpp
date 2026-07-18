@@ -62,7 +62,7 @@ audio::dsp::Biquad::Type biquad_type_from(const std::string& name) {
 
 NodeRuntime::NodeRuntime(const ntp::DspNode& def, const LoadedNtpPlugin& plugin, std::uint32_t rate,
                          std::uint32_t seed)
-    : def_(&def), rate_(rate), rng_(seed | 1U) {
+    : def_(&def), rate_(rate), rng_(seed | 1U), env_stages_(def.env_stages) {
     auto add_param = [this](const char* name, float base) {
         params_[static_cast<std::size_t>(param_count_)] = {.name = name, .base = base};
         ++param_count_;
@@ -302,6 +302,16 @@ void NodeRuntime::note_on() {
     }
 }
 
+void NodeRuntime::set_env_stage(int stage_index, double target, double time) {
+    if (def_->type != ntp::NodeType::kEnvelope || stage_index < 0 ||
+        stage_index >= static_cast<int>(env_stages_.size())) {
+        return;
+    }
+    ntp::EnvelopeStage& stage = env_stages_[static_cast<std::size_t>(stage_index)];
+    stage.target = std::clamp(target, 0.0, 1.0);
+    stage.time = std::max(0.001, time);
+}
+
 bool NodeRuntime::envelope_active() const {
     if (def_->type != ntp::NodeType::kEnvelope) {
         return false;
@@ -313,7 +323,7 @@ void NodeRuntime::process_envelope(float* out, std::uint32_t frames,
                                    const VoiceControls* controls) {
     const float gate = controls != nullptr ? controls->gate : 1.0F;
     const float release_time = std::max(1e-3F, resolved(0, 0));
-    const auto& stages = def_->env_stages;
+    const auto& stages = env_stages_; // per-instance copy (set_env_stage)
     for (std::uint32_t i = 0; i < frames; ++i) {
         if (gate < 0.5F && !env_released_) {
             env_released_ = true;

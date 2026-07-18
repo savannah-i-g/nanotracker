@@ -873,9 +873,13 @@ TEST_CASE("envelope stage writes clamp and reshape the attack", "[ntp]") {
         CHECK_FALSE(instance.set_env_stage("amp", 0, 0.5, 0.1));
         CHECK_FALSE(instance.set_env_stage("env", 2, 0.5, 0.1));
         CHECK_FALSE(instance.set_env_stage("env", -1, 0.5, 0.1));
-        const ntp::DspNode& env = plugin->manifest.graph.nodes[1];
-        CHECK(env.env_stages[0].target == 1.0);
-        CHECK(env.env_stages[0].time == 0.001);
+        // The edit is a per-instance override, clamped (target 0..1,
+        // time >= 1 ms); the shared manifest stays at its authored value.
+        const std::vector<ntp::EnvelopeStage> eff = instance.effective_env_stages("env");
+        REQUIRE(eff.size() == 2);
+        CHECK(eff[0].target == 1.0);
+        CHECK(eff[0].time == 0.001);
+        CHECK(plugin->manifest.graph.nodes[1].env_stages[0].time == 0.002); // manifest untouched
         fast_peak = render_peak(instance);
     }
 
@@ -883,7 +887,8 @@ TEST_CASE("envelope stage writes clamp and reshape the attack", "[ntp]") {
     {
         nt::plugins::NtpInstance instance(*plugin, kRate);
         CHECK(instance.set_env_stage("env", 0, 1.0, 0.2)); // 200 ms attack
-        CHECK(plugin->manifest.graph.nodes[1].env_stages[0].time == 0.2);
+        CHECK(instance.effective_env_stages("env")[0].time == 0.2);
+        CHECK(plugin->manifest.graph.nodes[1].env_stages[0].time == 0.002); // still authored
         slow_peak = render_peak(instance);
     }
 
@@ -905,10 +910,13 @@ TEST_CASE("session envelope commit routes through the structural republish", "[n
     REQUIRE(session.set_plugin_env_stage(node_id, "env", 1, 1.4, 0.0002));
     const nt::plugins::NtpInstance* instance = session.plugin_instance(node_id);
     REQUIRE(instance != nullptr);
-    const ntp::DspNode& env = instance->manifest().graph.nodes[1];
-    CHECK(env.env_stages[1].target == 1.0); // clamped from 1.4
-    CHECK(env.env_stages[1].time == 0.001); // clamped from 0.2 ms
-    CHECK(env.env_stages[0].time == 0.002); // untouched neighbour
+    // Per-instance override, clamped; the shared manifest is untouched.
+    const std::vector<ntp::EnvelopeStage> eff = instance->effective_env_stages("env");
+    REQUIRE(eff.size() == 2);
+    CHECK(eff[1].target == 1.0);                                           // clamped from 1.4
+    CHECK(eff[1].time == 0.001);                                           // clamped from 0.2 ms
+    CHECK(eff[0].time == 0.002);                                           // untouched neighbour
+    CHECK(instance->manifest().graph.nodes[1].env_stages[1].time == 0.05); // manifest authored
 
     CHECK_FALSE(session.set_plugin_env_stage(node_id, "ghost", 0, 0.5, 0.1));
     CHECK_FALSE(session.set_plugin_env_stage("no-such-node", "env", 0, 0.5, 0.1));

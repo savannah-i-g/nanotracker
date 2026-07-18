@@ -8,11 +8,13 @@
 // this class — it only ever proves progress through snapshots).
 //
 // ── The fence ────────────────────────────────────────────────────────
-// Grace clock: every kSetBundle/kSwapBundle carries a monotonically
-// increasing publish serial (Command::serial; the session is the
-// single fenced producer). The engine records the serial when it
-// applies the command — in the command drain at the head of a pull,
-// before any rendering — and republishes it in every snapshot
+// Grace clock: every kSetBundle/kSwapBundle — and the fenced preview
+// commands kPlaySample/kStopSample (ProjectSession::preview_file, which
+// retires the buffer a new preview unlinks) — carries a monotonically
+// increasing publish serial (Command::serial; the session is the single
+// fenced producer). The engine records the serial when it applies the
+// command — in the command drain at the head of a pull, before any
+// rendering — and republishes the running max in every snapshot
 // (EngineSnapshot::bundle_serial), which is written at the END of the
 // pull.
 //

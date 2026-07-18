@@ -359,6 +359,16 @@ void NtpUi::draw_envelope_editor(app::ProjectSession& session, const std::string
     if (env == nullptr || env->env_stages.empty()) {
         return;
     }
+    // The curve to draw and grab is this instance's — the manifest holds
+    // the authored defaults; per-instance edits live on the instance
+    // (NtpInstance::effective_env_stages).
+    std::vector<ntp::EnvelopeStage> live_stages = env->env_stages;
+    if (const plugins::NtpInstance* inst = session.plugin_instance(workspace_id)) {
+        std::vector<ntp::EnvelopeStage> effective = inst->effective_env_stages(env->id);
+        if (!effective.empty()) {
+            live_stages = std::move(effective);
+        }
+    }
 
     const float width = control.width > 0.0F ? control.width : 160.0F;
     const float height = control.height > 0.0F ? control.height : 56.0F;
@@ -393,12 +403,12 @@ void NtpUi::draw_envelope_editor(app::ProjectSession& session, const std::string
 
     // Drag lifecycle before drawing so the curve reflects this frame.
     if (!dragging && ImGui::IsItemActivated()) {
-        const double total = axis_total(env->env_stages);
+        const double total = axis_total(live_stages);
         const ImVec2 mouse = ImGui::GetMousePos();
         int best = -1;
         float best_d2 = 10.0F * 10.0F; // grab radius, squared
-        for (int i = 0; i < static_cast<int>(env->env_stages.size()); ++i) {
-            const ImVec2 point = stage_point(env->env_stages, i, total);
+        for (int i = 0; i < static_cast<int>(live_stages.size()); ++i) {
+            const ImVec2 point = stage_point(live_stages, i, total);
             const float dx = mouse.x - point.x;
             const float dy = mouse.y - point.y;
             const float d2 = (dx * dx) + (dy * dy);
@@ -408,8 +418,7 @@ void NtpUi::draw_envelope_editor(app::ProjectSession& session, const std::string
             }
         }
         if (best >= 0) {
-            env_drag_ = {
-                .key = drag_key, .stage = best, .total = total, .preview = env->env_stages};
+            env_drag_ = {.key = drag_key, .stage = best, .total = total, .preview = live_stages};
             dragging = true;
         }
     }
@@ -439,7 +448,7 @@ void NtpUi::draw_envelope_editor(app::ProjectSession& session, const std::string
 
     // Curve + draggable points, from the preview while dragging and
     // the live stages otherwise.
-    const std::vector<ntp::EnvelopeStage>& stages = dragging ? env_drag_.preview : env->env_stages;
+    const std::vector<ntp::EnvelopeStage>& stages = dragging ? env_drag_.preview : live_stages;
     const double total = dragging ? env_drag_.total : axis_total(stages);
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRect(origin, ImVec2{origin.x + width, origin.y + height},

@@ -99,6 +99,14 @@ public:
     // stay free-running for oscillators — classic analogue behaviour).
     void note_on();
 
+    // Per-instance envelope override (the envelope-editor commit,
+    // routed through NtpInstance::set_env_stage). Writes this runtime's
+    // own stage copy — the shared manifest is never mutated, so sibling
+    // instances of the same plugin keep their curves. Bounds-checked;
+    // no-op on non-envelope nodes. Session thread, inside the caller's
+    // structural stop→publish window.
+    void set_env_stage(int stage_index, double target, double time);
+
     [[nodiscard]] const ntp::DspNode& def() const { return *def_; }
 
     // True while the node still shapes audible output after gate-off
@@ -130,7 +138,10 @@ private:
     float brown_ = 0.0F;
     double lfo_phase_ = 0.0;
     float sh_value_ = 0.0F;
-    // envelope
+    // envelope — a per-instance copy of the manifest's stage array
+    // (empty on non-envelope nodes). process_envelope reads this, not
+    // the shared def, so envelope edits scope to one instance.
+    std::vector<ntp::EnvelopeStage> env_stages_;
     int env_stage_ = -1;
     double env_stage_t_ = 0.0;
     float env_value_ = 0.0F;

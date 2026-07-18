@@ -68,8 +68,9 @@ const LoadedNtpPlugin* PluginRegistry::find(const std::string& plugin_id) const 
 }
 
 NtpInstance* PluginRegistry::create_instance(const std::string& plugin_id) {
-    // Mutable lookup: instances write envelope-stage edits back to the
-    // owning plugin's manifest (NtpInstance::set_env_stage).
+    // The manifest is shared read-only across instances — envelope edits
+    // are per-instance overrides (NtpInstance::set_env_stage), not
+    // manifest writes.
     for (const auto& plugin : plugins_) {
         if (plugin->manifest.id == plugin_id) {
             instances_.push_back(std::make_unique<NtpInstance>(*plugin, device_rate_));

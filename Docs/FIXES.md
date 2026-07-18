@@ -399,3 +399,45 @@ detail as each fix lands.
   new `AudioEngine` `kSetTempo` command, updates the running transport's
   play state so a mid-playback change is audible from the next tick.
   Requested by the owner during this fix stage.
+- **Envelope stage edits are per-instance and persistent** (closes the
+  Stage 20 recorded gap above): NTP envelope-editor drags previously
+  mutated the shared manifest (`plugins/ntp_voices` `set_env_stage`),
+  so an edit reached every instance of the same plugin id, and PLGB
+  re-embedding the original archive meant the edit reverted on
+  save→load. The web editor moved ADSR params on a per-node basis with
+  no cross-instance leakage, so the plugin-wide scope was a native
+  regression, not web parity. Now each `NtpInstance` holds an override
+  table and each envelope `NodeRuntime` its own stage copy
+  (`ntp_graph` `env_stages_`); `set_env_stage` writes only this
+  instance's copies, leaving the manifest authored. The edits persist
+  in a new additive FTRK block, **XINS** (v15, `Docs/ftrk-format.md`) —
+  the writer emits from live instances, the reader replays into them
+  after instantiation; files without the block load unchanged.
+- **native_stage ABI state persists** (Stage 21 recorded gap): the
+  frozen `ntp_stage_abi.h` `state_save`/`state_load` were exercised by
+  tests but never written to disk — a stage's internal state was
+  session-live only. XINS (above) now carries each native_stage node's
+  opaque chunk keyed by node id; the reader restores it through
+  `set_native_stage_state` after the instance instantiates. The ABI
+  promises stage authors that `state_save` (main thread) never overlaps
+  `process()`, but the workspace graph is processed on the audio thread
+  on every block whenever the device is open — independent of the
+  transport — so there is no session-thread window to read a live
+  stage's state while the device pulls. The save path therefore only
+  calls `state_save` when the device is idle (offline export, or before
+  the first bundle publishes) and otherwise emits the last quiescent
+  capture cached at load / device-idle save (`project_session.cpp`).
+  Consequence, recorded not hidden: internal state a stage evolves
+  purely inside `process()` mid-session is persisted at its last
+  quiescent value, not continuously; an RT-coordinated capture (post a
+  quiesce command, snapshot-ack, then save) is the future path if a
+  real stage needs it. The frozen ABI contract is never violated.
+- **Record quantiser anchors on the sub-tick frame edge** (the web
+  recorded MIDI input at whatever row the UI thread happened to observe
+  — strictly coarser): `EngineSnapshot` now publishes
+  `tick_frame_remainder` (frames elapsed since the current tick's edge
+  at publish), so `app/midi_record`'s quantiser recovers the exact
+  frame the (row, tick) began instead of assuming the publish landed on
+  the boundary. This removes the up-to-one-tick early read near row
+  boundaries recorded at Stage 17; the change is snapshot-additive, so
+  the golden RT render path is untouched.

@@ -68,11 +68,15 @@ int quantise_record_row(const RecordAnchor& anchor, std::uint64_t at_frame) {
     const double frames_per_tick =
         static_cast<double>(anchor.sample_rate) * 2.5 / static_cast<double>(anchor.bpm);
     const double row_frames = frames_per_tick * anchor.speed;
-    // Signed distance from the publish instant; events stamped inside
-    // the publishing pull sit at or before it, so deltas are normally
-    // negative. The subtraction wraps safely for any |delta| < 2^63.
-    const auto delta =
-        static_cast<double>(static_cast<std::int64_t>(at_frame - anchor.stream_frames));
+    // Anchor at the frame the (row, tick) edge actually began, not the
+    // publish instant: stream_frames is the end of the publishing pull,
+    // tick_frame_remainder how far into the tick that landed.
+    const std::uint64_t tick_edge = anchor.stream_frames - anchor.tick_frame_remainder;
+    // Signed distance from that edge; events stamped inside the
+    // publishing pull sit at or before stream_frames but after the
+    // edge, so deltas span both signs. The subtraction wraps safely for
+    // any |delta| < 2^63.
+    const auto delta = static_cast<double>(static_cast<std::int64_t>(at_frame - tick_edge));
     const double pos = anchor.row + (((anchor.tick * frames_per_tick) + delta) / row_frames);
     // Nearest row, halves up (the header's round-up rule); wrap keeps
     // negative targets correct too.
@@ -120,10 +124,12 @@ void MidiRecord::apply_note_on(ProjectSession& session, int midi_note, int veloc
         break;
     case MidiInputMode::kEnter:
         // The keyboard-entry path at the pattern cursor, plus the
-        // velocity mapping; audition matches keyboard entry.
+        // velocity mapping; audition matches keyboard entry. The panel
+        // readout follows the note exactly as a keystroke would.
         enter_note_cell(session, cursor_.step_pattern(), cursor_.step_row(), cursor_.step_channel(),
                         tracker_note(midi_note), cursor_.step_entry_slot(),
                         velocity_to_volume_ ? velocity_volume(velocity) : -1, true);
+        cursor_.step_set_last_note(tracker_note(midi_note));
         cursor_.step_advance();
         break;
     case MidiInputMode::kRecord:
@@ -174,7 +180,8 @@ void MidiRecord::record(ProjectSession& session, int midi_note, int velocity,
                               .bpm = snap.bpm,
                               .pattern_rows = static_cast<int>(rows.size()),
                               .sample_rate = snap.sample_rate,
-                              .stream_frames = snap.stream_frames};
+                              .stream_frames = snap.stream_frames,
+                              .tick_frame_remainder = snap.tick_frame_remainder};
     const int row = quantise_record_row(anchor, at_frame);
     const int channel = std::clamp(armed_channel_, 0, project.channels - 1);
     // No audition: the transport is already sounding the pattern.

@@ -1,15 +1,12 @@
 #include "ui/sample_browser_view.h"
 
-#include "audio/sample_buffer.h"
-
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <imgui.h>
-#include <iterator>
+#include <string>
 #include <system_error>
 
 namespace nt::ui {
@@ -116,47 +113,18 @@ void SampleBrowserView::refresh() {
     });
 }
 
-void SampleBrowserView::audition(audio::AudioEngine& audio,
-                                 std::vector<std::unique_ptr<audio::SampleBuffer>>& pool,
-                                 const Entry& entry) {
-    if (!audio.running()) {
-        status_ = "audio device not running";
+void SampleBrowserView::audition(app::ProjectSession& session, const Entry& entry) {
+    if (!session.preview_file(entry.path)) {
+        status_ = session.error();
         return;
     }
-    const std::string key = entry.path.string();
-    const audio::SampleBuffer* buffer = nullptr;
-    if (const auto found = decoded_.find(key); found != decoded_.end()) {
-        buffer = found->second;
-    } else {
-        std::ifstream file(entry.path, std::ios::binary);
-        if (!file) {
-            status_ = "cannot open " + key;
-            return;
-        }
-        const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)),
-                                              std::istreambuf_iterator<char>());
-        std::string format;
-        std::string error;
-        auto loaded = audio::load_sample_memory(bytes.data(), bytes.size(), audio.sample_rate(),
-                                                format, error);
-        if (loaded == nullptr) {
-            status_ = error;
-            return;
-        }
-        buffer = loaded.get();
-        pool.push_back(std::move(loaded));
-        decoded_.emplace(key, buffer);
-    }
-    // Same one-shot preview voice as the shell's load & play; a new
-    // audition replaces the previous one.
-    audio.send({.type = audio::Command::Type::kPlaySample, .value = 0.0F, .sample = buffer});
-    status_ = entry.name + " — " + std::to_string(buffer->frames) + " fr @ " +
-              std::to_string(buffer->rate) + " Hz";
+    const audio::SampleBuffer* buffer = session.preview_buffer();
+    status_ = buffer != nullptr ? entry.name + " — " + std::to_string(buffer->frames) + " fr @ " +
+                                      std::to_string(buffer->rate) + " Hz"
+                                : entry.name;
 }
 
-void SampleBrowserView::draw(app::ProjectSession& session, audio::AudioEngine& audio,
-                             std::vector<std::unique_ptr<audio::SampleBuffer>>& audition_pool,
-                             int target_slot, const Theme& theme) {
+void SampleBrowserView::draw(app::ProjectSession& session, int target_slot, const Theme& theme) {
     ImGui::SetNextWindowSize(ImVec2(430, 400), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("SAMPLE BROWSER")) {
         if (dirty_) {
@@ -212,7 +180,7 @@ void SampleBrowserView::draw(app::ProjectSession& session, audio::AudioEngine& a
                                 : session.error();
                     }
                 } else if (!entry.is_dir) {
-                    audition(audio, audition_pool, entry);
+                    audition(session, entry);
                 }
             }
         }

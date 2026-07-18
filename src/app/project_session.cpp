@@ -42,6 +42,7 @@ void ProjectSession::new_project() {
     undo_.clear();
     povr_raw_.clear(); // carried POVR belongs to the previous project
     povr_pending_.clear();
+    xins_pending_.clear();
     for (auto& buffer : buffers_) {
         reclaimer_.stage(std::move(buffer)); // freed once the publish below lands
     }
@@ -87,6 +88,7 @@ bool ProjectSession::load_file(const std::filesystem::path& path) {
     undo_.clear();
     povr_raw_.clear(); // imports carry no POVR; drop the previous project's
     povr_pending_.clear();
+    xins_pending_.clear();
     decode_samples();
     rebuild_workspace_nodes();
     publish_bundle();
@@ -157,6 +159,7 @@ bool ProjectSession::load_ftrk(const std::filesystem::path& path) {
     // and any uninterpretable raw block are kept for round-trip.
     povr_raw_ = std::move(result->extras.povr_raw);
     povr_pending_.clear();
+    xins_pending_.clear();
     for (io::FtrkPovrOverride& entry : result->extras.povr_overrides) {
         plugins::NtpInstance* instance = plugin_instance(entry.instance_id);
         if (instance == nullptr) {
@@ -185,6 +188,38 @@ bool ProjectSession::load_ftrk(const std::filesystem::path& path) {
         slot.buffer = std::move(buffer);
         // Fresh instance — nothing replaced, nothing to retire.
         instance->set_slot_override(entry.slot_id, std::move(slot));
+    }
+    // Per-instance NTP state (XINS, v15): envelope-stage overrides and
+    // native_stage chunks apply to the freshly-woken instances (the
+    // transport is stopped and the bundle not yet published, so the
+    // stage state_load calls satisfy the ABI's "not while processing"
+    // rule). Records whose instance never resolved round-trip untouched.
+    xins_pending_.clear();
+    for (io::FtrkInstanceState& state : result->extras.instance_states) {
+        plugins::NtpInstance* instance = plugin_instance(state.workspace_id);
+        if (instance == nullptr) {
+            xins_pending_.push_back(std::move(state));
+            continue;
+        }
+        for (const io::FtrkInstanceEnvStage& env : state.env_stages) {
+            if (!instance->set_env_stage(env.node_id, env.stage_index, env.target, env.time)) {
+                load_warnings_.push_back("instance state " + state.workspace_id +
+                                         ": envelope node \"" + env.node_id + "\" stage " +
+                                         std::to_string(env.stage_index) + " did not resolve");
+            }
+        }
+        for (const io::FtrkInstanceStageChunk& chunk : state.stage_chunks) {
+            if (instance->set_native_stage_state(chunk.node_id, chunk.chunk)) {
+                // Seed the quiescent-capture cache so a save while the
+                // device is running re-emits the loaded state rather
+                // than nothing.
+                native_stage_chunk_cache_[state.workspace_id][chunk.node_id] = chunk.chunk;
+            } else {
+                load_warnings_.push_back("instance state " + state.workspace_id +
+                                         ": native stage \"" + chunk.node_id +
+                                         "\" state did not restore");
+            }
+        }
     }
     // External plugin state (XPLG, v14): reopen libraries and restore.
     for (const io::FtrkExternalPlugin& external : result->extras.external) {
@@ -285,6 +320,56 @@ io::FtrkWriteExtras ProjectSession::assemble_write_extras() {
         }
         extras.external.push_back(std::move(external));
     }
+    // Per-instance NTP state (XINS): envelope-stage overrides and
+    // native_stage ABI chunks from the live instances, then the entries
+    // that never resolved at load. WPBR carries plugin parameters;
+    // this block carries the state WPBR cannot express.
+    for (const auto& [workspace_id, instance] : instances_by_node_) {
+        io::FtrkInstanceState state;
+        state.workspace_id = workspace_id;
+        for (const auto& [node_id, stages] : instance->env_overrides()) {
+            for (const auto& [stage_index, stage] : stages) {
+                state.env_stages.push_back({.node_id = node_id,
+                                            .stage_index = stage_index,
+                                            .target = stage.target,
+                                            .time = stage.time});
+            }
+        }
+        for (const ntp::DspNode& node : instance->manifest().graph.nodes) {
+            if (node.type != ntp::NodeType::kNativeStage) {
+                continue;
+            }
+            // state_save is a main-thread ABI call the stage author is
+            // promised never overlaps process(). The graph runs on the
+            // audio thread whenever the device is pulling, so we only
+            // touch the live runtime when it is not — otherwise the last
+            // quiescent capture (seeded at load, refreshed on every
+            // device-idle save) is what persists.
+            std::vector<std::uint8_t> chunk;
+            if (!audio_.running()) {
+                chunk = instance->native_stage_state(node.id);
+                if (!chunk.empty()) {
+                    native_stage_chunk_cache_[workspace_id][node.id] = chunk;
+                }
+            } else {
+                const auto ws_it = native_stage_chunk_cache_.find(workspace_id);
+                if (ws_it != native_stage_chunk_cache_.end()) {
+                    const auto node_it = ws_it->second.find(node.id);
+                    if (node_it != ws_it->second.end()) {
+                        chunk = node_it->second;
+                    }
+                }
+            }
+            if (!chunk.empty()) {
+                state.stage_chunks.push_back({.node_id = node.id, .chunk = std::move(chunk)});
+            }
+        }
+        if (!state.env_stages.empty() || !state.stage_chunks.empty()) {
+            extras.instance_states.push_back(std::move(state));
+        }
+    }
+    extras.instance_states.insert(extras.instance_states.end(), xins_pending_.begin(),
+                                  xins_pending_.end());
     return extras;
 }
 
@@ -1540,6 +1625,51 @@ void ProjectSession::preview_note(int channel, int slot, int note) {
                  .sample = buffer,
                  .bundle = nullptr,
                  .aux_int = channel});
+}
+
+bool ProjectSession::preview_file(const std::filesystem::path& path) {
+    if (!audio_.running()) {
+        error_ = "audio device not running";
+        return false;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error_ = "cannot open " + path.string();
+        return false;
+    }
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                          std::istreambuf_iterator<char>());
+    std::string format;
+    std::string decode_error;
+    std::shared_ptr<audio::SampleBuffer> buffer = audio::load_sample_memory(
+        bytes.data(), bytes.size(), audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000,
+        format, decode_error);
+    if (buffer == nullptr) {
+        error_ = decode_error;
+        return false;
+    }
+    // The command installs this buffer as the one-shot preview voice,
+    // unlinking the previous audition; that buffer frees once the
+    // engine proves it applied this serial (sample_reclaim.h fence).
+    const std::uint64_t serial = ++publish_serial_;
+    audio_.send({.type = audio::Command::Type::kPlaySample,
+                 .value = 0.0F,
+                 .sample = buffer.get(),
+                 .serial = serial});
+    if (preview_buffer_ != nullptr) {
+        reclaimer_.retire(std::move(preview_buffer_), serial);
+    }
+    preview_buffer_ = std::move(buffer);
+    return true;
+}
+
+void ProjectSession::stop_preview() {
+    if (preview_buffer_ == nullptr) {
+        return;
+    }
+    const std::uint64_t serial = ++publish_serial_;
+    audio_.send({.type = audio::Command::Type::kStopSample, .serial = serial});
+    reclaimer_.retire(std::move(preview_buffer_), serial);
 }
 
 bool ProjectSession::load_sample_into_slot(int slot, const std::filesystem::path& path) {

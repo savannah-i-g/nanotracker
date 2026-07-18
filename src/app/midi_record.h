@@ -64,6 +64,11 @@ public:
     [[nodiscard]] virtual int step_entry_slot() const = 0;
     // The keyboard edit-step advance (one row, clamped at the last).
     virtual void step_advance() = 0;
+    // Records the note just entered for the NOTE ENTRY panel readout —
+    // the keyboard path sets PatternView::last_note_ inline, so MIDI
+    // step entry keeps the readout in step through here (tracker note
+    // 1..96).
+    virtual void step_set_last_note(int note) = 0;
 };
 
 // The note-entry cell write shared by the pattern editor's keyboard
@@ -86,6 +91,11 @@ struct RecordAnchor {
     int pattern_rows = 64;
     std::uint32_t sample_rate = 48000;
     std::uint64_t stream_frames = 0; // total frames rendered at publish
+    // Frames elapsed since the (row, tick) edge above, at publish
+    // (EngineSnapshot::tick_frame_remainder). stream_frames minus this
+    // is the exact frame that edge began — the quantiser anchors there
+    // rather than assuming the publish landed on the boundary.
+    std::uint32_t tick_frame_remainder = 0;
 };
 
 // Maps an event's absolute stream frame onto the pattern row it
@@ -95,13 +105,12 @@ struct RecordAnchor {
 // Rounding past the final row wraps to row 0 of the same pattern (the
 // single-pattern loop case; across order-list transitions late events
 // quantise against the next snapshot, which already reports the new
-// pattern). Precision: the anchor assumes the snapshot was published
-// exactly on its (row, tick) boundary — the sub-tick remainder is not
-// published — so positions can read early by up to one tick (1/speed
-// row). The web recorded at whatever row the UI thread happened to
-// observe, which is strictly coarser. Returns the row, clamped/
-// wrapped into [0, pattern_rows); guards (transport not running,
-// zero speed/bpm/rate) return the anchor row.
+// pattern). Precision: the anchor recovers the frame its (row, tick)
+// edge began (stream_frames - tick_frame_remainder), so a mid-tick
+// publish no longer reads early. The web recorded at whatever row the
+// UI thread happened to observe, which is strictly coarser. Returns
+// the row, clamped/wrapped into [0, pattern_rows); guards (transport
+// not running, zero speed/bpm/rate) return the anchor row.
 [[nodiscard]] int quantise_record_row(const RecordAnchor& anchor, std::uint64_t at_frame);
 
 class MidiRecord {
