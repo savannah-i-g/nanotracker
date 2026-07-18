@@ -1,0 +1,527 @@
+#include "io/ftrk_reader.h"
+
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+
+namespace nt::io {
+
+namespace {
+
+// Bounds-checked little-endian cursor. Every read throws
+// TruncatedError past the end; core parsing catches it and fails the
+// load, block parsers catch it and skip the block.
+struct TruncatedError {};
+
+class Cursor {
+public:
+    Cursor(const std::uint8_t* data, std::size_t size) : data_(data), size_(size) {}
+
+    void seek(std::size_t offset) {
+        if (offset > size_) {
+            throw TruncatedError{};
+        }
+        pos_ = offset;
+    }
+
+    [[nodiscard]] std::size_t pos() const { return pos_; }
+
+    [[nodiscard]] std::size_t size() const { return size_; }
+
+    std::uint8_t u8() {
+        need(1);
+        return data_[pos_++];
+    }
+
+    std::int8_t i8() { return static_cast<std::int8_t>(u8()); }
+
+    std::uint16_t u16() {
+        need(2);
+        const std::uint16_t v =
+            static_cast<std::uint16_t>(data_[pos_]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(data_[pos_ + 1]) << 8U);
+        pos_ += 2;
+        return v;
+    }
+
+    std::uint32_t u32() {
+        need(4);
+        std::uint32_t v = 0;
+        std::memcpy(&v, data_ + pos_, 4); // little-endian host assumption documented in 02
+        pos_ += 4;
+        return v;
+    }
+
+    float f32() {
+        need(4);
+        float v = 0;
+        std::memcpy(&v, data_ + pos_, 4);
+        pos_ += 4;
+        return v;
+    }
+
+    // Fixed-size zero-terminated field (name fields).
+    std::string fixed_string(std::size_t len) {
+        need(len);
+        // Byte-buffer → text reinterpretation is the deserializer's job.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        const char* start = reinterpret_cast<const char*>(data_ + pos_);
+        std::size_t end = 0;
+        while (end < len && start[end] != '\0') {
+            ++end;
+        }
+        pos_ += len;
+        return {start, end};
+    }
+
+    // Length-delimited UTF-8 string.
+    std::string bytes_string(std::size_t len) {
+        need(len);
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        const char* start = reinterpret_cast<const char*>(data_ + pos_);
+        pos_ += len;
+        return {start, len};
+    }
+
+    std::vector<std::uint8_t> bytes(std::size_t len) {
+        need(len);
+        std::vector<std::uint8_t> out(data_ + pos_, data_ + pos_ + len);
+        pos_ += len;
+        return out;
+    }
+
+    void skip(std::size_t len) {
+        need(len);
+        pos_ += len;
+    }
+
+private:
+    void need(std::size_t n) const {
+        if (pos_ + n > size_) {
+            throw TruncatedError{};
+        }
+    }
+
+    const std::uint8_t* data_;
+    std::size_t size_;
+    std::size_t pos_ = 0;
+};
+
+bool magic_is(Cursor& c, const char* magic) {
+    return c.fixed_string(4) == magic;
+}
+
+void parse_fx_block(Cursor c, std::size_t offset, int pattern_count, int rows_per_pattern,
+                    engine::TrackerProject& project, FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "FXMX")) {
+        extras.warnings.emplace_back("FXMX: bad magic, block skipped");
+        return;
+    }
+    const int channel_count = c.u8();
+    for (int i = 0; i < channel_count; ++i) {
+        FtrkFxChannel ch;
+        ch.name = c.fixed_string(16);
+        ch.volume = c.u8();
+        // Stored as int8 (-100..100 pan law).
+        ch.pan = static_cast<std::int8_t>(c.u8()); // NOLINT(bugprone-signed-char-misuse)
+        ch.enabled = c.u8() != 0;
+        ch.color = c.bytes_string(c.u8());
+        const int sends = c.u8();
+        for (int s = 0; s < sends; ++s) {
+            ch.tracker_sends.push_back(c.f32());
+        }
+        const int modules = c.u8();
+        for (int m = 0; m < modules; ++m) {
+            FtrkFxModule mod;
+            mod.module_id = c.fixed_string(16);
+            mod.enabled = c.u8() != 0;
+            const int params = c.u8();
+            for (int pi = 0; pi < params; ++pi) {
+                const std::string key = c.bytes_string(c.u8());
+                mod.params.emplace_back(key, c.f32());
+            }
+            ch.modules.push_back(std::move(mod));
+        }
+        extras.fx_channels.push_back(std::move(ch));
+    }
+
+    const int fx_pattern_count = c.u8();
+    for (int pi = 0; pi < fx_pattern_count; ++pi) {
+        engine::FxPattern fx;
+        const int row_count = c.u16();
+        for (int r = 0; r < row_count; ++r) {
+            if (c.u8() == 0) {
+                fx.present.push_back(false);
+                fx.cells.emplace_back();
+            } else {
+                engine::FxCell cell;
+                cell.channel_index = c.u8();
+                cell.module_index = c.u8();
+                cell.param_key = c.bytes_string(c.u8());
+                cell.value = c.f32();
+                fx.present.push_back(true);
+                fx.cells.push_back(std::move(cell));
+            }
+        }
+        project.fx_mixer.fx_patterns.push_back(std::move(fx));
+    }
+    // Pad to pattern count like the web reader.
+    while (static_cast<int>(project.fx_mixer.fx_patterns.size()) < pattern_count) {
+        engine::FxPattern fx;
+        fx.present.assign(static_cast<std::size_t>(rows_per_pattern), false);
+        fx.cells.resize(static_cast<std::size_t>(rows_per_pattern));
+        project.fx_mixer.fx_patterns.push_back(std::move(fx));
+    }
+}
+
+void parse_ins_table(Cursor c, std::size_t offset, int version, engine::TrackerProject& project,
+                     FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "INTB")) {
+        extras.warnings.emplace_back("INTB: bad magic, block skipped");
+        return;
+    }
+    const int entry_count = c.u8();
+    for (int i = 0; i < entry_count; ++i) {
+        engine::InstrumentTableEntry entry;
+        const int type = c.u8();
+        if (type == 0) {
+            entry.type = engine::InstrumentSourceType::kSample;
+            entry.sample_id = c.u8();
+        } else if (type == 1) {
+            entry.type = engine::InstrumentSourceType::kPlugin;
+            entry.plugin_id = c.bytes_string(c.u8());
+            const int params = c.u8();
+            for (int pi = 0; pi < params; ++pi) {
+                const std::string key = c.bytes_string(c.u8());
+                entry.plugin_preset_params.emplace_back(key, c.f32());
+            }
+        } else if (type == 2) {
+            entry.type = engine::InstrumentSourceType::kWorkspace;
+            entry.workspace_id = c.bytes_string(c.u16());
+        } else {
+            extras.warnings.emplace_back("INTB: unknown entry type " + std::to_string(type));
+            c.skip(1); // mirror the web reader's best-effort resync
+        }
+        project.instrument_table.push_back(std::move(entry));
+    }
+
+    if (version >= 9) {
+        // BNDT trailer: per-entry bound tracks.
+        if (magic_is(c, "BNDT")) {
+            for (int i = 0; i < entry_count; ++i) {
+                const int count = c.u8();
+                std::vector<int> tracks;
+                tracks.reserve(static_cast<std::size_t>(count));
+                for (int j = 0; j < count; ++j) {
+                    tracks.push_back(c.u8());
+                }
+                // Sort + dedupe, matching the web loader's safety net.
+                std::sort(tracks.begin(), tracks.end());
+                tracks.erase(std::unique(tracks.begin(), tracks.end()), tracks.end());
+                project.instrument_table[static_cast<std::size_t>(i)].bound_tracks =
+                    std::move(tracks);
+            }
+        }
+    }
+}
+
+void parse_seq_block(Cursor c, std::size_t offset, engine::TrackerProject& project,
+                     FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "SEQB")) {
+        extras.warnings.emplace_back("SEQB: bad magic, block skipped");
+        return;
+    }
+    const int pattern_count = c.u16();
+    const int channel_count = c.u8();
+    for (int pi = 0; pi < pattern_count; ++pi) {
+        engine::SequencePattern sp;
+        for (int ch = 0; ch < channel_count; ++ch) {
+            std::vector<engine::SequenceLayer> layers;
+            const int layer_count = c.u8();
+            for (int li = 0; li < layer_count; ++li) {
+                engine::SequenceLayer layer;
+                layer.instrument = c.u8();
+                layer.enabled = c.u8() != 0;
+                const int notes = c.u16();
+                for (int ni = 0; ni < notes; ++ni) {
+                    engine::SequenceNote note;
+                    note.pitch = c.u8();
+                    note.start_tick = c.u16();
+                    note.duration_ticks = c.u16();
+                    note.velocity = c.u8();
+                    layer.notes.push_back(note);
+                }
+                layers.push_back(std::move(layer));
+            }
+            sp.layers.push_back(std::move(layers));
+        }
+        project.sequence_mixer.seq_patterns.push_back(std::move(sp));
+    }
+
+    // Sparse custom channel colors (alpha bit marks "set").
+    if (c.pos() < c.size()) {
+        const int color_count = c.u8();
+        for (int i = 0; i < color_count; ++i) {
+            const int ch = c.u8();
+            const std::uint32_t r = c.u8();
+            const std::uint32_t g = c.u8();
+            const std::uint32_t b = c.u8();
+            if (ch < engine::kMaxChannels) {
+                project.channel_colors[static_cast<std::size_t>(ch)] =
+                    0xFF000000U | (r << 16U) | (g << 8U) | b;
+            }
+        }
+    }
+}
+
+void parse_wpbr(Cursor c, std::size_t offset, FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "WPBR")) {
+        extras.warnings.emplace_back("WPBR: bad magic, block skipped");
+        return;
+    }
+    extras.workspace_json = c.bytes_string(c.u32());
+}
+
+void parse_plgb(Cursor c, std::size_t offset, FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "PLGB")) {
+        extras.warnings.emplace_back("PLGB: bad magic, block skipped");
+        return;
+    }
+    const int count = c.u16();
+    for (int i = 0; i < count; ++i) {
+        FtrkBundledPlugin plugin;
+        plugin.plugin_id = c.bytes_string(c.u16());
+        plugin.archive = c.bytes(c.u32());
+        extras.plugins.push_back(std::move(plugin));
+    }
+}
+
+void parse_pprs(Cursor c, std::size_t offset, FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "PPRS")) {
+        extras.warnings.emplace_back("PPRS: bad magic, block skipped");
+        return;
+    }
+    if (c.u8() != 1) {
+        extras.warnings.emplace_back("PPRS: unsupported block version, skipped");
+        return;
+    }
+    extras.pprs_json = c.bytes_string(c.u32());
+}
+
+void parse_xplg(Cursor c, std::size_t offset, FtrkExtras& extras) {
+    c.seek(offset);
+    if (!magic_is(c, "XPLG")) {
+        extras.warnings.emplace_back("XPLG: bad magic, block skipped");
+        return;
+    }
+    const int count = c.u16();
+    for (int i = 0; i < count; ++i) {
+        FtrkExternalPlugin external;
+        external.workspace_id = c.bytes_string(c.u16());
+        external.kind = c.u8();
+        external.plugin_id = c.bytes_string(c.u16());
+        external.library_path = c.bytes_string(c.u16());
+        external.state = c.bytes(c.u32());
+        const int params = c.u16();
+        for (int p = 0; p < params; ++p) {
+            const std::uint32_t id = c.u32();
+            const std::uint64_t lo = c.u32();
+            const std::uint64_t hi = c.u32();
+            const std::uint64_t raw = lo | (hi << 32);
+            double value = 0.0;
+            std::memcpy(&value, &raw, sizeof(value));
+            external.params.emplace_back(id, value);
+        }
+        extras.external.push_back(std::move(external));
+    }
+}
+
+template <typename Fn>
+void tolerant(FtrkExtras& extras, const char* block, Fn&& fn) {
+    try {
+        std::forward<Fn>(fn)();
+    } catch (const TruncatedError&) {
+        extras.warnings.emplace_back(std::string(block) + ": truncated, block skipped");
+    }
+}
+
+} // namespace
+
+std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t size,
+                                        std::string& error) {
+    FtrkReadResult result;
+    engine::TrackerProject& project = result.project;
+    FtrkExtras& extras = result.extras;
+
+    try {
+        Cursor c(data, size);
+        if (!magic_is(c, "FTRK")) {
+            error = "not a .ftrk file (bad magic)";
+            return std::nullopt;
+        }
+        const int version = c.u16();
+        if (version < 1 || version > 14) {
+            error = "unsupported .ftrk version " + std::to_string(version) + " (supported: 1-14)";
+            return std::nullopt;
+        }
+        extras.version = version;
+
+        project.name = c.fixed_string(32);
+        project.bpm = version >= 2 ? static_cast<int>(c.f32()) : c.u16();
+        project.speed = c.u8();
+        project.rows_per_pattern = c.u8();
+        project.channels = c.u8();
+        const int pattern_count = c.u8();
+        const int order_length = c.u16();
+        const int sample_count = c.u8();
+
+        const std::size_t reserved_pos = c.pos();
+        const std::uint32_t fx_offset = version >= 4 ? (c.seek(reserved_pos), c.u32()) : 0;
+        const std::uint32_t ins_offset = version >= 5 ? (c.seek(reserved_pos + 4), c.u32()) : 0;
+        const std::uint32_t wpbr_offset = version >= 7 ? (c.seek(reserved_pos + 8), c.u32()) : 0;
+        const std::uint32_t plgb_offset = version >= 8 ? (c.seek(reserved_pos + 12), c.u32()) : 0;
+        const std::uint32_t seq_offset = version >= 10 ? (c.seek(reserved_pos + 16), c.u32()) : 0;
+        const std::uint32_t povr_offset = version >= 12 ? (c.seek(reserved_pos + 20), c.u32()) : 0;
+        const std::uint32_t pprs_offset = version >= 13 ? (c.seek(reserved_pos + 24), c.u32()) : 0;
+        const std::uint32_t xplg_offset = version >= 14 ? (c.seek(reserved_pos + 28), c.u32()) : 0;
+        // v14 grew the reserved region to fit the XPLG offset.
+        c.seek(reserved_pos + (version >= 14 ? 35 : version >= 2 ? 31 : 35));
+
+        for (int i = 0; i < order_length; ++i) {
+            project.order_list.push_back(c.u8());
+        }
+
+        for (int p = 0; p < pattern_count; ++p) {
+            engine::TrackerPattern pattern;
+            pattern.id = p;
+            pattern.name = c.fixed_string(16);
+            int rows = project.rows_per_pattern;
+            if (version >= 6) {
+                rows = c.u16();
+                pattern.highlight_major = c.u8();
+                pattern.highlight_minor = c.u8();
+            }
+            pattern.rows.reserve(static_cast<std::size_t>(rows));
+            for (int r = 0; r < rows; ++r) {
+                std::vector<engine::TrackerCell> row;
+                row.reserve(static_cast<std::size_t>(project.channels));
+                for (int ch = 0; ch < project.channels; ++ch) {
+                    engine::TrackerCell cell;
+                    cell.note = c.u8();
+                    const std::uint8_t raw_ins = c.u8();
+                    // v9+: slot in the low 5 bits, bound sub-slot in
+                    // the top 3; earlier files use the whole byte.
+                    cell.instrument = version >= 9 ? raw_ins & 0x1FU : raw_ins;
+                    cell.bound_index = version >= 9 ? (raw_ins >> 5U) & 0x07U : 0;
+                    cell.volume = c.u8();
+                    cell.effect = c.u8();
+                    cell.effect_param = c.u8();
+                    row.push_back(cell);
+                }
+                pattern.rows.push_back(std::move(row));
+            }
+            project.patterns.push_back(std::move(pattern));
+        }
+
+        struct PendingSample {
+            engine::TrackerSample meta;
+            std::uint32_t data_length = 0;
+        };
+
+        std::vector<PendingSample> pending;
+        for (int i = 0; i < sample_count; ++i) {
+            PendingSample ps;
+            ps.meta.id = c.u8();
+            const int fmt = c.u8();
+            if (fmt == 1) {
+                ps.meta.format = "ogg";
+            } else if (fmt == 2) {
+                ps.meta.format = "mp3";
+            } else {
+                ps.meta.format = "wav";
+            }
+            ps.meta.base_note = c.u8();
+            // Finetune is a signed byte by format definition.
+            ps.meta.finetune = c.i8(); // NOLINT(bugprone-signed-char-misuse)
+            ps.meta.volume = c.u8();
+            ps.meta.pan = c.u8();
+            ps.meta.loop_start = c.u32();
+            ps.meta.loop_length = c.u32();
+            ps.meta.sample_rate = c.u32();
+            ps.meta.num_channels = c.u8();
+            ps.meta.frames = c.u32();
+            ps.data_length = c.u32();
+            ps.meta.name = c.fixed_string(22);
+            ps.meta.file_name = c.fixed_string(32);
+            const std::uint16_t stretch = c.u16();
+            ps.meta.stretch_ratio = (version >= 2 && stretch > 0) ? stretch / 10000.0 : 1.0;
+            ps.meta.category = version >= 3 ? c.u8() : 0;
+            pending.push_back(std::move(ps));
+        }
+        for (PendingSample& ps : pending) {
+            ps.meta.original_data = c.bytes(ps.data_length);
+            project.samples.push_back(std::move(ps.meta));
+        }
+
+        const auto in_range = [size](std::uint32_t off) { return off > 0 && off < size; };
+        if (in_range(fx_offset)) {
+            tolerant(extras, "FXMX", [&] {
+                parse_fx_block(Cursor(data, size), fx_offset, pattern_count,
+                               project.rows_per_pattern, project, extras);
+            });
+        }
+        if (in_range(ins_offset)) {
+            tolerant(extras, "INTB", [&] {
+                parse_ins_table(Cursor(data, size), ins_offset, version, project, extras);
+            });
+        }
+        if (in_range(wpbr_offset)) {
+            tolerant(extras, "WPBR", [&] { parse_wpbr(Cursor(data, size), wpbr_offset, extras); });
+        }
+        if (in_range(plgb_offset)) {
+            tolerant(extras, "PLGB", [&] { parse_plgb(Cursor(data, size), plgb_offset, extras); });
+        }
+        if (in_range(seq_offset)) {
+            tolerant(extras, "SEQB",
+                     [&] { parse_seq_block(Cursor(data, size), seq_offset, project, extras); });
+        }
+        if (in_range(povr_offset)) {
+            tolerant(extras, "POVR", [&] {
+                Cursor pc(data, size);
+                pc.seek(povr_offset);
+                extras.povr_raw = pc.bytes(size - povr_offset);
+            });
+        }
+        if (in_range(pprs_offset)) {
+            tolerant(extras, "PPRS", [&] { parse_pprs(Cursor(data, size), pprs_offset, extras); });
+        }
+        if (in_range(xplg_offset)) {
+            tolerant(extras, "XPLG", [&] { parse_xplg(Cursor(data, size), xplg_offset, extras); });
+        }
+    } catch (const TruncatedError&) {
+        error = "truncated .ftrk file";
+        return std::nullopt;
+    }
+
+    return result;
+}
+
+std::optional<FtrkReadResult> read_ftrk_file(const std::filesystem::path& path,
+                                             std::string& error) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error = "cannot open " + path.string();
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(file)),
+                                   std::istreambuf_iterator<char>());
+    return read_ftrk(data.data(), data.size(), error);
+}
+
+} // namespace nt::io

@@ -1,0 +1,103 @@
+# CI: build + full test suite on both platforms. Device-dependent
+# audio/MIDI tests WARN-skip on headless runners by construction; the
+# Windows job is the project's Windows toolchain (no local Windows
+# machine — Docs/Plan_PostV1/02-release-engineering.md) and produces
+# the downloadable beta artifact.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (GCC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenal-dev libasound2-dev libx11-dev \
+            libgl1-mesa-dev xorg-dev python3-jinja2 libopenmpt-dev
+
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-gcc
+
+      - name: Dependency source cache
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: linux-deps-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
+      - name: Configure
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows (MSVC, beta)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: glad generator dependency
+        run: pip install jinja2
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: windows-msvc
+          variant: sccache
+
+      - name: Dependency source cache
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: windows-deps-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # The zip a beta tester downloads: executable + runtime DLLs
+      # (OpenAL Soft + libopenmpt set, already copied beside the exe
+      # by the build) + assets + licences.
+      - name: Package beta artifact
+        shell: cmd
+        run: |
+          mkdir dist
+          copy build\nanotracker.exe dist\
+          copy build\*.dll dist\
+          xcopy /E /I assets dist\assets
+          copy LICENSE dist\
+          xcopy /E /I LICENSES dist\LICENSES
+          copy README.md dist\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nanotracker-windows-x64-BETA
+          path: dist

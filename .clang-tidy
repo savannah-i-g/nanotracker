@@ -1,0 +1,43 @@
+---
+# Static-analysis gate; must be clean at every stage close
+# (Docs/Plan_NativePort/12-doctrine.md). Noisy or style-opinion checks
+# are disabled deliberately — additions welcome, removals need a reason
+# in the commit/ledger.
+#
+# misc-include-cleaner: its direct-provider model fights facade headers
+# (imgui.h, nlohmann/json.hpp, <filesystem>) and produces dozens of
+# false demands per file. easily-swappable-parameters: flags every
+# (width, height) and (r, g, b) signature; graphics code is built from
+# such signatures. optin.performance.Padding: fires on deliberate
+# alignas(64) false-sharing padding in rt/ primitives.
+# pro-bounds-constant-array-index: demands gsl::at for every computed
+# index; ring buffers and palette tables are built from computed
+# indices. function-cognitive-complexity: the sequencer state machine
+# and format parsers are faithful ports of reference implementations —
+# splitting them to satisfy the metric would destroy line-for-line
+# reviewability against the reference.
+Checks: >
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  misc-*,
+  cppcoreguidelines-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-vararg,
+  -misc-non-private-member-variables-in-classes,
+  -readability-braces-around-statements,
+  -misc-include-cleaner,
+  -bugprone-easily-swappable-parameters,
+  -clang-analyzer-optin.performance.Padding,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -readability-function-cognitive-complexity
+WarningsAsErrors: ''
+# Anchored to this project's module directories; must not match
+# FetchContent trees under build/_deps/*/include/.
+HeaderFilterRegex: '(src/(app|platform|rt|audio|engine|modplay|graph|plugins|ext|midi|ui|io)|include/ntp)/'
+FormatStyle: file

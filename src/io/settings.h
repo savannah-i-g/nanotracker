@@ -1,0 +1,45 @@
+// io/settings — application settings persisted as versioned JSON in the
+// user config directory. One flat struct; subsystems read what they
+// need. Unknown keys in the file are preserved-ignored (forward
+// compatible); missing keys take defaults (backward compatible).
+#pragma once
+
+#include <filesystem>
+#include <string>
+
+namespace nt::io {
+
+struct Settings {
+    // Bumped only on incompatible layout changes; additions are free.
+    int schema = 1;
+
+    std::string theme_id = "amber";
+
+    bool crt_enabled = true;
+    float crt_intensity = 0.35F; // 0 = off visually, 1 = full effect
+
+    int window_width = 1280;
+    int window_height = 720;
+
+    // Cable overlay physics/looks (web cableSettings.ts defaults).
+    // resolution 1 = straight line, no physics; 16 = smooth rope.
+    int cable_resolution = 16;
+    float cable_gravity = 900.0F; // px/s^2
+    float cable_damping = 0.06F;
+    float cable_slack = 1.18F;
+    int cable_iterations = 4;
+    float cable_thickness = 3.0F;
+};
+
+// Loads settings from `path`. A missing or unreadable file yields
+// defaults; a malformed file yields defaults (the error is reported on
+// stderr, never fatal — settings must not brick startup).
+Settings load_settings(const std::filesystem::path& path);
+
+// Writes settings as pretty-printed JSON. Returns false on I/O failure.
+bool save_settings(const Settings& settings, const std::filesystem::path& path);
+
+// Conventional location: config_dir()/settings.json.
+std::filesystem::path default_settings_path();
+
+} // namespace nt::io
