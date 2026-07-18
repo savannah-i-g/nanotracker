@@ -22,4 +22,9 @@ bool decode_wav(const std::uint8_t* data, std::size_t size, Decoded& out, std::s
 bool decode_mp3(const std::uint8_t* data, std::size_t size, Decoded& out, std::string& error);
 bool decode_ogg(const std::uint8_t* data, std::size_t size, Decoded& out, std::string& error);
 
+// "KEY=value" strings from an OGG's Vorbis comment header (export
+// metadata verification; stb_vorbis exposes the parsed list).
+bool decode_ogg_comments(const std::uint8_t* data, std::size_t size, std::vector<std::string>& out,
+                         std::string& error);
+
 } // namespace nt::audio::codec

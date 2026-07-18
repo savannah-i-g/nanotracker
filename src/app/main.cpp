@@ -17,6 +17,7 @@
 #include "platform/imgui_context.h"
 #include "platform/paths.h"
 #include "ui/crt_pass.h"
+#include "ui/export_view.h"
 #include "ui/fx_mixer_view.h"
 #include "ui/instrument_table_view.h"
 #include "ui/midi_view.h"
@@ -302,6 +303,7 @@ void draw_audio_section(nt::audio::AudioEngine& audio, SampleRegistry& samples) 
 struct ShellState {
     bool show_help = false;
     bool show_licences = false;
+    bool show_export = false;
 };
 
 const nt::ui::Theme* draw_shell_window(const nt::ui::Theme* active, nt::io::Settings& settings,
@@ -362,21 +364,9 @@ const nt::ui::Theme* draw_shell_window(const nt::ui::Theme* active, nt::io::Sett
                 std::fprintf(stderr, "load: %s\n", session.error().c_str());
             }
         }
-        static std::array<char, 512> export_path{};
-        ImGui::SetNextItemWidth(220.0F);
-        ImGui::InputTextWithHint("##exp", "path/to/mix.wav|.ogg|.mp3", export_path.data(),
-                                 export_path.size());
         ImGui::SameLine();
         if (ImGui::SmallButton("export")) {
-            const std::filesystem::path out = export_path.data();
-            nt::io::ExportFormat format = nt::io::ExportFormat::kWav;
-            if (out.extension() == ".ogg") {
-                format = nt::io::ExportFormat::kOgg;
-            } else if (out.extension() == ".mp3") {
-                format = nt::io::ExportFormat::kMp3;
-            }
-            const nt::io::ExportResult exported = session.export_current(out, format);
-            std::fprintf(stderr, "export: %s\n", exported.ok ? "ok" : exported.error.c_str());
+            shell.show_export = !shell.show_export;
         }
 
         ImGui::Separator();
@@ -499,6 +489,7 @@ int main(int argc, char** argv) {
         nt::ui::ModuleView module_view;
         nt::ui::WorkspaceView workspace_view;
         nt::ui::PianoRollView piano_roll_view;
+        nt::ui::ExportView export_view(nt::platform::config_dir() / "export_presets.json");
         nt::midi::MidiInput midi_input;
         nt::midi::MidiOutputPort midi_output;
         nt::midi::MidiOutThread midi_out_thread(audio, midi_output);
@@ -707,6 +698,7 @@ int main(int argc, char** argv) {
             workspace_view.draw(session, settings, *theme);
             piano_roll_view.draw(session, *theme);
             midi_view.draw(session, *theme);
+            export_view.draw(session, *theme, shell.show_export);
             session.update_clap_editors();
             nt::platform::ImGuiHost::end_frame();
 

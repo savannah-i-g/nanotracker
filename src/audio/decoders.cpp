@@ -20,8 +20,7 @@ bool decode_wav(const std::uint8_t* data, std::size_t size, Decoded& out, std::s
     out.channels = wav.channels;
     out.rate = wav.sampleRate;
     out.interleaved.resize(static_cast<std::size_t>(out.frames) * out.channels);
-    const drwav_uint64 read =
-        drwav_read_pcm_frames_f32(&wav, out.frames, out.interleaved.data());
+    const drwav_uint64 read = drwav_read_pcm_frames_f32(&wav, out.frames, out.interleaved.data());
     drwav_uninit(&wav);
     if (read != out.frames) {
         error = "short WAV read";
@@ -41,8 +40,7 @@ bool decode_mp3(const std::uint8_t* data, std::size_t size, Decoded& out, std::s
     out.channels = mp3.channels;
     out.rate = mp3.sampleRate;
     out.interleaved.resize(static_cast<std::size_t>(out.frames) * out.channels);
-    const drmp3_uint64 read =
-        drmp3_read_pcm_frames_f32(&mp3, frames, out.interleaved.data());
+    const drmp3_uint64 read = drmp3_read_pcm_frames_f32(&mp3, frames, out.interleaved.data());
     drmp3_uninit(&mp3);
     if (read != frames) {
         error = "short MP3 read";
@@ -55,8 +53,8 @@ bool decode_ogg(const std::uint8_t* data, std::size_t size, Decoded& out, std::s
     int channels = 0;
     int rate = 0;
     short* pcm = nullptr;
-    const int frames = stb_vorbis_decode_memory(data, static_cast<int>(size), &channels,
-                                                &rate, &pcm);
+    const int frames =
+        stb_vorbis_decode_memory(data, static_cast<int>(size), &channels, &rate, &pcm);
     if (frames <= 0 || pcm == nullptr) {
         error = "not a decodable OGG";
         return false;
@@ -69,6 +67,25 @@ bool decode_ogg(const std::uint8_t* data, std::size_t size, Decoded& out, std::s
         out.interleaved[i] = static_cast<float>(pcm[i]) / 32768.0F;
     }
     free(pcm);
+    return true;
+}
+
+bool decode_ogg_comments(const std::uint8_t* data, std::size_t size, std::vector<std::string>& out,
+                         std::string& error) {
+    int open_error = 0;
+    stb_vorbis* vorbis = stb_vorbis_open_memory(data, static_cast<int>(size), &open_error, nullptr);
+    if (vorbis == nullptr) {
+        error = "not a decodable OGG";
+        return false;
+    }
+    const stb_vorbis_comment comment = stb_vorbis_get_comment(vorbis);
+    out.clear();
+    for (int i = 0; i < comment.comment_list_length; ++i) {
+        if (comment.comment_list[i] != nullptr) {
+            out.emplace_back(comment.comment_list[i]);
+        }
+    }
+    stb_vorbis_close(vorbis);
     return true;
 }
 

@@ -154,6 +154,23 @@ FetchContent_Declare(miniz
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(miniz)
 
+# libebur128 — BS.1770 loudness / true-peak measurement for the export
+# normalisers (Docs/Plan_PostV1/Research/05). MIT. Its own CMake is
+# geared to shared-lib installs; the library is a single C99 TU, so it
+# is compiled directly as a static target. The bundled <sys/queue.h>
+# replacement is used on every platform (MSVC ships none; one code
+# path everywhere).
+FetchContent_Declare(libebur128
+    GIT_REPOSITORY https://github.com/jiixyj/libebur128.git
+    GIT_TAG v1.2.6
+    GIT_SHALLOW ON)
+FetchContent_Populate(libebur128)
+add_library(ebur128 STATIC ${libebur128_SOURCE_DIR}/ebur128/ebur128.c)
+target_include_directories(ebur128 SYSTEM PUBLIC ${libebur128_SOURCE_DIR}/ebur128)
+target_include_directories(ebur128 SYSTEM PRIVATE ${libebur128_SOURCE_DIR}/ebur128/queue)
+target_compile_definitions(ebur128 PRIVATE $<$<C_COMPILER_ID:MSVC>:_USE_MATH_DEFINES>)
+target_compile_options(ebur128 PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>)
+
 # libogg + libvorbis — OGG export encoding. BSD.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(ogg
@@ -266,6 +283,7 @@ add_executable(nanotracker
     src/app/autosave.cpp
     src/app/undo.cpp
     src/ui/cable_overlay.cpp
+    src/ui/export_view.cpp
     src/ui/fx_mixer_view.cpp
     src/ui/instrument_table_view.cpp
     src/ui/pattern_view.cpp
@@ -296,6 +314,8 @@ add_executable(nanotracker
     src/plugins/preset_bank.cpp
     src/io/ftrk_reader.cpp
     src/io/ftrk_writer.cpp
+    src/io/export_post.cpp
+    src/io/export_presets.cpp
     src/io/export_render.cpp
     src/io/import/import_common.cpp
     src/io/import/it_importer.cpp
@@ -320,7 +340,7 @@ target_include_directories(nanotracker PRIVATE src include)
 target_link_libraries(nanotracker PRIVATE
     glfw OpenGL::GL imgui glad_gl_core_33 nlohmann_json::nlohmann_json
     OpenAL::OpenAL dr_libs stb samplerate libopenmpt::libopenmpt miniz
-    clap vst3_hosting rtmidi vorbisenc vorbis ogg ${CMAKE_DL_LIBS}
+    clap vst3_hosting rtmidi vorbisenc vorbis ogg ebur128 ${CMAKE_DL_LIBS}
     $<$<BOOL:${UNIX}>:X11::X11>)
 
 # Third-party single-file codec implementations: warnings are theirs.

@@ -3,6 +3,43 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 15 closed — Export suite
+
+- Landed: **ExportOptions** through `io/export_render` — order range
+  (transport gains an exclusive end bound and *parks* instead of
+  looping: fixes v1's timing-dependent tail-replays-the-song bug),
+  render rate, tail, stems (per-channel passes through the new
+  `kSetChannelMask` trigger gate — sequencer still runs every channel
+  so global timing effects stay identical across passes; ZIP bundling
+  via miniz), WAV 16/24/32-float writers (proper fmt-3 + fact
+  chunks), OGG VBR quality, MP3 bitrate/quality knobs.
+  **Post-processing** (`io/export_post`): linear/equal-power fades,
+  then peak / true-peak / LUFS normalization via **libebur128 1.2.6**
+  (MIT, FetchContent, new roster row + licence text) — BS.1770-4
+  true peak and per-rate K-weighting replace the web's
+  approximations. **Metadata**: WAV LIST/INFO, Vorbis comments, ID3
+  via optionally-resolved lame `id3tag_*`. **Presets**
+  (`io/export_presets`): four web built-ins carried across + user
+  presets as config-dir JSON. **EXPORT window** (`ui/export_view`):
+  full options surface, preset row, worker-thread render (value-copy
+  in, mutex-guarded result out, UI never blocks), replacing the
+  shell path box; `--export` CLI unchanged. Six FIXES.md entries.
+- Known debt (recorded): the view snapshots FtrkWriteExtras via a
+  temp-ftrk round-trip because ProjectSession exposes no
+  options-taking export entry; fold a public
+  `export_current(path, options)` into the next session-touching
+  stage. No incremental progress hook in `export_project` — the
+  window shows honest spinner + final result.
+- Verification: 62/62 both trees (11 new tests: order-range length,
+  stems Goertzel isolation + ZIP read-back, WAV 24/32f round-trips,
+  OGG quality/comments, MP3 CBR + ID3 magic, fade envelopes,
+  −20 dBFS fixture reads −20 LUFS ±0.5 then normalizes to target,
+  preset store round-trip/read-only/malformed-tolerance); tidy clean;
+  scripted UI run exports a valid WAV (RIFF parsed: 48 kHz PCM16,
+  8.66 s, INAM/ICRD present) with the completed status on screen;
+  CI green both platforms.
+- Backup: `NanoTracker_stage15_2026-07-18.tar.gz`; git tag `stage-15`.
+
 ## 2026-07-18 — Stage 14 closed — Pattern + piano-roll editing depth
 
 - Landed: **undo grouping** (`app/undo` begin/end_group + RAII

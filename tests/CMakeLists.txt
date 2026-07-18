@@ -25,6 +25,8 @@ add_executable(nt_tests
     midi_test.cpp
     ftrk_writer_test.cpp
     export_test.cpp
+    export_suite_test.cpp
+    export_presets_test.cpp
     ${CMAKE_SOURCE_DIR}/src/app/pattern_ops.cpp
     ${CMAKE_SOURCE_DIR}/src/app/project_session.cpp
     ${CMAKE_SOURCE_DIR}/src/app/undo.cpp
@@ -56,6 +58,8 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/ext/vst3_host.cpp
     ${CMAKE_SOURCE_DIR}/src/io/ftrk_reader.cpp
     ${CMAKE_SOURCE_DIR}/src/io/ftrk_writer.cpp
+    ${CMAKE_SOURCE_DIR}/src/io/export_post.cpp
+    ${CMAKE_SOURCE_DIR}/src/io/export_presets.cpp
     ${CMAKE_SOURCE_DIR}/src/io/export_render.cpp
     ${CMAKE_SOURCE_DIR}/src/io/import/import_common.cpp
     ${CMAKE_SOURCE_DIR}/src/io/import/it_importer.cpp
@@ -68,8 +72,8 @@ target_include_directories(nt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(nt_tests PRIVATE Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json OpenAL::OpenAL dr_libs stb samplerate
-    libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi vorbisenc vorbis ogg ${CMAKE_DL_LIBS}
-    $<$<BOOL:${UNIX}>:X11::X11>)
+    libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi vorbisenc vorbis ogg ebur128
+    ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
 
 # Real .clap binary for host verification (loaded at runtime by
 # clap_host_test).

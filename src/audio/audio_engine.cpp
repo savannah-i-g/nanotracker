@@ -96,6 +96,8 @@ void AudioEngine::drain_commands() {
         case Command::Type::kSetBundle:
             bundle_ = command.bundle;
             transport_playing_ = false;
+            transport_end_bound_ = 0;
+            channel_mask_ = 0xFFFFFFFFU;
             for (ChannelVoice& v : voices_) {
                 v.active = false;
             }
@@ -108,7 +110,15 @@ void AudioEngine::drain_commands() {
             break;
         case Command::Type::kTransportPlay:
             if (bundle_ != nullptr && bundle_->project != nullptr) {
+                const auto& order_list = bundle_->project->order_list;
+                const auto orders = static_cast<int>(order_list.size());
                 play_state_ = engine::create_play_state(*bundle_->project);
+                if (orders > 0) {
+                    const int start = std::clamp(command.aux_int, 0, orders - 1);
+                    play_state_.order_pos = start;
+                    play_state_.pattern_index = order_list[static_cast<std::size_t>(start)];
+                }
+                transport_end_bound_ = std::clamp(command.aux_int2, 0, orders);
                 play_state_.is_playing = true;
                 transport_playing_ = true;
                 frames_until_tick_ = 0.0; // first tick fires immediately
@@ -116,9 +126,13 @@ void AudioEngine::drain_commands() {
             break;
         case Command::Type::kTransportStop:
             transport_playing_ = false;
+            transport_end_bound_ = 0;
             for (ChannelVoice& v : voices_) {
                 v.active = false;
             }
+            break;
+        case Command::Type::kSetChannelMask:
+            channel_mask_ = static_cast<std::uint32_t>(command.aux_int);
             break;
         case Command::Type::kFxParam:
             if (bundle_ != nullptr && bundle_->fx_rack != nullptr) {
@@ -180,6 +194,10 @@ void AudioEngine::handle_seq_triggers() {
     for (int t = 0; t < play_state_.seq_trigger_count; ++t) {
         const engine::SequenceTrigger& trigger =
             play_state_.seq_triggers[static_cast<std::size_t>(t)];
+        if (trigger.channel_index >= 0 && trigger.channel_index < engine::kMaxChannels &&
+            (channel_mask_ >> static_cast<unsigned>(trigger.channel_index) & 1U) == 0U) {
+            continue; // masked out (stems export)
+        }
         const int slot = trigger.instrument;
         if (slot < 1 || slot > engine::kMaxSamples) {
             continue;
@@ -288,6 +306,9 @@ void AudioEngine::handle_tick_outputs() {
     const int channel_count = std::min(project.channels, engine::kMaxChannels);
 
     for (int ch = 0; ch < channel_count; ++ch) {
+        if ((channel_mask_ >> static_cast<unsigned>(ch) & 1U) == 0U) {
+            continue; // masked out (stems export): no triggers or follows
+        }
         const engine::ChannelPlayState& c = play_state_.channels[static_cast<std::size_t>(ch)];
         ChannelVoice& voice = voices_[static_cast<std::size_t>(ch)];
 
@@ -453,16 +474,31 @@ void AudioEngine::advance_transport_in_block(std::uint32_t frames) {
     // sample-accurately.
     std::uint32_t offset = 0;
     while (offset < frames) {
-        if (frames_until_tick_ <= 0.0) {
+        if (transport_playing_ && frames_until_tick_ <= 0.0) {
             engine::advance_tick(play_state_, *bundle_->project);
-            handle_tick_outputs();
-            frames_until_tick_ += static_cast<double>(sample_rate_) * 2.5 / play_state_.bpm;
+            if (transport_end_bound_ > 0 &&
+                (play_state_.song_ended || play_state_.order_pos >= transport_end_bound_)) {
+                // Range end: mirror the web offline renderer's
+                // break-before-schedule — this tick's outputs never
+                // fire; the transport parks and voices ring out (the
+                // export tail). song_ended stays latched for readers.
+                play_state_.is_playing = false;
+                play_state_.song_ended = true;
+                transport_playing_ = false;
+            } else {
+                handle_tick_outputs();
+                frames_until_tick_ += static_cast<double>(sample_rate_) * 2.5 / play_state_.bpm;
+            }
         }
-        const auto span = static_cast<std::uint32_t>(
-            std::min<double>(frames - offset, std::max(1.0, std::ceil(frames_until_tick_))));
+        const auto span = transport_playing_
+                              ? static_cast<std::uint32_t>(std::min<double>(
+                                    frames - offset, std::max(1.0, std::ceil(frames_until_tick_))))
+                              : frames - offset; // parked: ring out the rest of the block
         render_voices_span(offset, span);
         render_seq_voices_span(offset, span);
-        frames_until_tick_ -= span;
+        if (transport_playing_) {
+            frames_until_tick_ -= span;
+        }
         offset += span;
     }
 }

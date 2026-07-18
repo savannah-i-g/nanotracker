@@ -161,9 +161,12 @@ TEST_CASE("offline export renders identically into wav, ogg and mp3", "[export]"
     nt::audio::codec::Decoded mp3_decoded;
     REQUIRE(nt::audio::codec::decode_mp3(mp3_bytes.data(), mp3_bytes.size(), mp3_decoded,
                                          decode_error));
-    const std::vector<float> mp3_mono = mono_of(mp3_decoded);
-    // LAME pads encoder delay, so the decoded length differs and the
-    // Goertzel bin grid shifts — the threshold is about presence, not
-    // parity (the OGG check above holds the tight line).
+    std::vector<float> mp3_mono = mono_of(mp3_decoded);
+    // LAME pads encoder delay, so the decoded stream is longer than the
+    // WAV and its Goertzel bin grid would shift; trimming to the WAV's
+    // window makes the magnitudes comparable (the remaining offset is
+    // phase-only at this window size). Looser line than OGG's — lossy
+    // presence, not parity.
+    mp3_mono.resize(wav_mono.size());
     CHECK(goertzel(mp3_mono, mp3_decoded.rate, peak_freq) > peak_mag * 0.25F);
 }

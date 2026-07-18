@@ -140,3 +140,29 @@ detail as each fix lands.
   transpose, and FT2-style effect-param interpolation (same command
   required at both endpoints, command copied onto filled rows), per
   the stage spec's exceed-the-thinness clause (`app/pattern_ops.cpp`).
+- **New (native-only): export tail no longer replays the song** — the
+  engine loops at song wrap and v1's export watched the one-shot
+  `song_ended` flag at pull granularity, so the "tail" could keep
+  sequencing from order 0 (timing-dependent). The transport now parks
+  at the range end / song wrap (kTransportPlay's exclusive end bound,
+  mirroring the web's break-before-schedule at
+  `exportRenderOffline.ts:272`) with voices ringing out, and export
+  polls per 128-frame block. The safety cap scales with render rate.
+- **True-peak/LUFS measured, not approximated**
+  (`exportPostProcess.ts:121-137` used 4× linear-interpolation "true
+  peak" and 48 kHz-only hard-coded K-weighting): native normalization
+  goes through libebur128 (BS.1770-4 polyphase true peak, per-rate
+  filter recalculation) — conformance-passing rather than
+  approximately right.
+- **Equal-power fade shapes are native-only** (web `applyFade` was
+  linear-only): the shape option is an exceed per the stage spec.
+- **ID3v2 via lame, not hand-rolled** (`exportMetadata.ts:161` built
+  ID3v2.3 frames by hand): native resolves lame's `id3tag_*` symbols
+  optionally; when the loaded lame lacks them, MP3 tags are skipped —
+  documented, never silently wrong.
+- **Not ported (recorded)**: the web's `bypassCompressor` render
+  option, RIFF cue-point chunks, BPM tags, the dither option, and
+  multi-format batch renders (the "Everything" preset — one format
+  per render natively). Recorded candidates if demand appears; the
+  "Live Capture (debug)" preset is obsolete by design (it existed to
+  work around the ScriptProcessorNode capture path, fixed natively).

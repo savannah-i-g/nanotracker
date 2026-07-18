@@ -81,25 +81,37 @@ struct Command {
         kToneFreq,
         kPlaySample,
         kStopSample,
-        kSetBundle,     // bundle = new playback bundle (or null to clear)
-        kSwapBundle,    // live bundle swap: transport, voices and play
-                        // state survive. Only for bundles whose project
-                        // pointer is unchanged (cable/graph edits).
-        kTransportPlay, // start sequencing from the current position
-        kTransportStop, // stop and reset position
-        kPreviewNote,   // audition: sample + value=rate ratio + aux_int=channel
-        kFxParam,       // aux_int=(ch<<16)|(mod<<8)|param_idx, value=new value
-        kSetModule,     // module = player to mix (null detaches)
-        kModulePlay,    // start module playback
-        kModuleStop,    // stop module playback
-        kPluginNoteOn,  // aux_int=(slot<<8)|midi_note, value=velocity
-        kPluginNoteOff, // aux_int=(slot<<8)|midi_note
+        kSetBundle,      // bundle = new playback bundle (or null to clear)
+        kSwapBundle,     // live bundle swap: transport, voices and play
+                         // state survive. Only for bundles whose project
+                         // pointer is unchanged (cable/graph edits).
+        kTransportPlay,  // start sequencing: aux_int = order-list start
+                         // position; aux_int2 = exclusive end bound
+                         // (0 = none — normal looped playback; N = park
+                         // the transport before order N or at song wrap,
+                         // voices ring out). Export passes range end + 1.
+        kTransportStop,  // stop and reset position
+        kSetChannelMask, // aux_int = audible-channel bitmask (bit =
+                         // channel index). Gates pattern, plugin and
+                         // sequence-layer note triggers only — the
+                         // sequencer still runs every channel, so
+                         // global timing effects (Fxx/Bxx/Dxx) stay
+                         // identical across stem passes. Reset to
+                         // all-on by kSetBundle.
+        kPreviewNote,    // audition: sample + value=rate ratio + aux_int=channel
+        kFxParam,        // aux_int=(ch<<16)|(mod<<8)|param_idx, value=new value
+        kSetModule,      // module = player to mix (null detaches)
+        kModulePlay,     // start module playback
+        kModuleStop,     // stop module playback
+        kPluginNoteOn,   // aux_int=(slot<<8)|midi_note, value=velocity
+        kPluginNoteOff,  // aux_int=(slot<<8)|midi_note
     };
     Type type = Type::kToneOff;
     float value = 0.0F;
     const SampleBuffer* sample = nullptr;
     const PlaybackBundle* bundle = nullptr;
     int aux_int = 0;
+    int aux_int2 = 0;
     modplay::ModulePlayer* module = nullptr;
 };
 
@@ -189,6 +201,12 @@ private:
     engine::TrackerPlayState play_state_{};
     bool transport_playing_ = false;
     double frames_until_tick_ = 0.0;
+    // Exclusive order-list bound from kTransportPlay (0 = none). When
+    // set, reaching it (or song wrap) parks the transport instead of
+    // looping — the offline export's range end.
+    int transport_end_bound_ = 0;
+    // kSetChannelMask trigger gate (stems export); all-on by default.
+    std::uint32_t channel_mask_ = 0xFFFFFFFFU;
     std::array<ChannelVoice, engine::kMaxChannels> voices_{};
     // Last plugin note per channel so release/retrigger can note_off.
     std::array<int, engine::kMaxChannels> plugin_note_{};
