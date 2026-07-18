@@ -45,23 +45,25 @@ std::unique_ptr<ClapEditorWindow> ClapEditorWindow::open(ClapPlugin& plugin, std
         error = std::string("plugin editor does not support ") + kWindowApi + " embedding";
         return nullptr;
     }
-    // Surface first: on a headless run this fails before the plugin
-    // gui is ever created. Resizability is the plugin's call.
-    const bool resizable = gui->can_resize != nullptr && gui->can_resize(plugin.raw());
-    auto surface = EditorHostSurface::open(plugin.name(), 640, 480, resizable, error);
-    if (surface == nullptr) {
-        error += " — parameter panel only";
-        return nullptr;
-    }
+    // The gui must exist before can_resize/get_size may be called
+    // (clap/ext/gui.h contract — u-he's debug hosts abort on
+    // violations), so creation precedes the surface; a headless
+    // surface failure destroys the gui again cleanly.
     if (!gui->create(plugin.raw(), kWindowApi, false)) {
         error = "plugin editor refused to create";
         return nullptr;
     }
     gui->set_scale(plugin.raw(), 1.0);
+    const bool resizable = gui->can_resize != nullptr && gui->can_resize(plugin.raw());
     uint32_t width = 640;
     uint32_t height = 480;
     gui->get_size(plugin.raw(), &width, &height);
-    surface->set_size(width, height);
+    auto surface = EditorHostSurface::open(plugin.name(), width, height, resizable, error);
+    if (surface == nullptr) {
+        gui->destroy(plugin.raw());
+        error += " — parameter panel only";
+        return nullptr;
+    }
 
     const clap_window_t clap_window = make_clap_window(surface->native_handle());
     if (!gui->set_parent(plugin.raw(), &clap_window)) {

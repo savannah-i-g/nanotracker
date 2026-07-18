@@ -502,14 +502,17 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
                 // slider under the cursor and the remapped grab runs
                 // away to the bound.
                 static float staged_scale = settings.ui_scale;
-                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                    staged_scale = settings.ui_scale; // follow external changes
-                }
                 ImGui::SetNextItemWidth(160.0F);
                 ImGui::SliderFloat("##ui_scale", &staged_scale, 0.6F, 2.0F, "%.2fx",
                                    ImGuiSliderFlags_AlwaysClamp);
                 if (ImGui::IsItemDeactivatedAfterEdit()) {
                     settings.ui_scale = staged_scale;
+                } else if (!ImGui::IsItemActive()) {
+                    // Idle: follow external changes (reset item, loaded
+                    // settings). Must run AFTER the widget — resyncing
+                    // pre-widget on the release frame overwrites the
+                    // staged value the commit is about to read.
+                    staged_scale = settings.ui_scale;
                 }
                 if (ImGui::MenuItem("reset to 1.00x")) {
                     settings.ui_scale = 1.0F;
