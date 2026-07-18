@@ -54,9 +54,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pin one interpreter (first on PATH) so the jinja2 install and
-      # the python3 that glad's build invokes are the same Python.
+      # CMake's FindPython prefers the registry's newest interpreter
+      # over PATH on Windows, so the pinned Python must be handed to
+      # the configure step explicitly (both find-module spellings).
       - uses: actions/setup-python@v5
+        id: python
         with:
           python-version: '3.12'
       - name: glad generator dependency
@@ -82,6 +84,8 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER_LAUNCHER=sccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          "-DPython_EXECUTABLE=${{ steps.python.outputs.python-path }}"
+          "-DPython3_EXECUTABLE=${{ steps.python.outputs.python-path }}"
 
       - name: Build
         run: cmake --build build -j4
