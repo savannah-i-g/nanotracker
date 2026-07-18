@@ -3,6 +3,36 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 26 closed — Undo history panel
+
+- Landed: **HISTORY window** (`ui/history_view`) over the UndoStack —
+  the linear edit list with the current position marked (above =
+  undoable, below = redoable), labels from the entries, sample-op
+  entries tagged, click-to-jump (computed step count replayed through
+  the session's undo/redo path as one guarded UI-thread batch, so it
+  stays closure- and group-safe), depth indicator (`n / 512`,
+  sample ops `n / 8`). New read-only UndoStack accessors
+  (`HistoryEntry`, `undo_depth`/`redo_depth`/`sample_op_depth`,
+  `undo_at`/`redo_at`, `was_cleared`/`clear_reason`) — the mutation/
+  closure API untouched. **Honest structural-clear surface**: `clear`
+  gained a default reason and leaves a breadcrumb; a new `reset`
+  empties silently. The three project-replacement sites
+  (new_project/load_file/load_ftrk) call `reset` (nothing was lost),
+  the 24 in-project structural edits keep `clear` (the panel shows
+  "history cleared: structural edit" rather than pretending). The
+  first new undoable edit clears the breadcrumb and restores the live
+  list. Floating, default-hidden, VIEW-toggled (the DEBUG-window
+  pattern). Retention extension for structural edits recorded as a
+  follow-up, not promised.
+- Verification: 148/148 both trees (+6: accessor enumeration order +
+  out-of-range + sample_op flags, undo/redo split movement + replay
+  order, group collapse to one entry, sample-op budget + oldest-first
+  eviction + older-entry truncation, clear/reset breadcrumb);
+  clear/reset split spot-verified at the call sites; tidy/format
+  clean; screenshots (edit list with position, marker moving on undo,
+  the honest "history cleared" surface after add-pattern).
+- Backup: `NanoTracker_stage26_2026-07-18.tar.gz`; git tag `stage-26`.
+
 ## 2026-07-18 — Stage 25 closed — Debt paydown (cycle 3 opens)
 
 - Landed: **record quantise precision** — `EngineSnapshot` gains

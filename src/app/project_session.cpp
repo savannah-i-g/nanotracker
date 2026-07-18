@@ -39,7 +39,7 @@ ProjectSession::~ProjectSession() {
 void ProjectSession::new_project() {
     stop();
     project_ = engine::create_project(4);
-    undo_.clear();
+    undo_.reset();     // fresh project: no history to have lost
     povr_raw_.clear(); // carried POVR belongs to the previous project
     povr_pending_.clear();
     xins_pending_.clear();
@@ -85,7 +85,7 @@ bool ProjectSession::load_file(const std::filesystem::path& path) {
         return false;
     }
     project_ = std::move(*imported);
-    undo_.clear();
+    undo_.reset();     // loaded project: no history to have lost
     povr_raw_.clear(); // imports carry no POVR; drop the previous project's
     povr_pending_.clear();
     xins_pending_.clear();
@@ -128,7 +128,7 @@ bool ProjectSession::load_ftrk(const std::filesystem::path& path) {
         project_.fx_mixer.channels.push_back(std::move(strip));
     }
     load_warnings_ = std::move(result->extras.warnings);
-    undo_.clear();
+    undo_.reset(); // loaded project: no history to have lost
     decode_samples();
     rebuild_workspace_nodes();
     // Bundled plugin archives (PLGB) join the catalogue before the

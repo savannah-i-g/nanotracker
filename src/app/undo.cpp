@@ -12,8 +12,9 @@ void UndoStack::push(std::string label, std::function<void()> undo, std::functio
     if (group_depth_ > 0) {
         group_entries_.push_back(std::move(entry));
         // Group members are new edits too: the redo branch dies now,
-        // not at commit time.
+        // not at commit time, and any wipe breadcrumb is stale.
         redo_stack_.clear();
+        cleared_ = false;
         return;
     }
     commit(std::move(entry));
@@ -104,14 +105,50 @@ const char* UndoStack::next_redo_label() const {
     return redo_stack_.empty() ? "" : redo_stack_.back().label.c_str();
 }
 
-void UndoStack::clear() {
+std::size_t UndoStack::sample_op_depth() const {
+    return static_cast<std::size_t>(std::count_if(undo_stack_.begin(), undo_stack_.end(),
+                                                  [](const Entry& e) { return e.sample_op; }));
+}
+
+UndoStack::HistoryEntry UndoStack::undo_at(std::size_t index) const {
+    if (index >= undo_stack_.size()) {
+        return {};
+    }
+    const Entry& entry = undo_stack_[index];
+    return {entry.label.c_str(), entry.sample_op};
+}
+
+UndoStack::HistoryEntry UndoStack::redo_at(std::size_t index) const {
+    if (index >= redo_stack_.size()) {
+        return {};
+    }
+    // Replay order: the next redo is the back of the stack.
+    const Entry& entry = redo_stack_[redo_stack_.size() - 1 - index];
+    return {entry.label.c_str(), entry.sample_op};
+}
+
+void UndoStack::discard_all() {
     undo_stack_.clear();
     redo_stack_.clear();
     group_entries_.clear();
     group_depth_ = 0;
 }
 
+void UndoStack::clear(std::string reason) {
+    discard_all();
+    cleared_ = true;
+    clear_reason_ = std::move(reason);
+}
+
+void UndoStack::reset() {
+    discard_all();
+    cleared_ = false;
+    clear_reason_.clear();
+}
+
 void UndoStack::commit(Entry entry) {
+    // A fresh undoable edit supersedes any structural-wipe breadcrumb.
+    cleared_ = false;
     undo_stack_.push_back(std::move(entry));
     if (undo_stack_.size() > kMaxEntries) {
         undo_stack_.pop_front();

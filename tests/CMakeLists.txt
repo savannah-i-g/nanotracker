@@ -20,6 +20,7 @@ add_executable(nt_tests
     sample_reclaim_test.cpp
     pattern_ops_test.cpp
     sequence_ops_test.cpp
+    undo_test.cpp
     convolution_test.cpp
     fx_chain_test.cpp
     graph_test.cpp

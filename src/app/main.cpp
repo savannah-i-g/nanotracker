@@ -22,6 +22,7 @@
 #include "ui/crt_pass.h"
 #include "ui/export_view.h"
 #include "ui/fx_mixer_view.h"
+#include "ui/history_view.h"
 #include "ui/instrument_table_view.h"
 #include "ui/local_api_view.h"
 #include "ui/midi_view.h"
@@ -281,7 +282,8 @@ struct WindowVisibility {
     bool note_entry = true;
     bool midi = true;
     bool local_api = true;
-    bool debug = false; // diagnostics surface, off by default
+    bool history = false; // edit-history panel, floating, off by default
+    bool debug = false;   // diagnostics surface, off by default
 };
 
 // The dock layout's top strip. Theme/CRT moved to the SETTINGS menu and
@@ -598,6 +600,7 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             ImGui::MenuItem("NOTE ENTRY", nullptr, &vis.note_entry);
             ImGui::MenuItem("MIDI", nullptr, &vis.midi);
             ImGui::MenuItem("LOCAL API", nullptr, &vis.local_api);
+            ImGui::MenuItem("HISTORY", nullptr, &vis.history);
             ImGui::MenuItem("EXPORT", nullptr, &shell.show_export);
             ImGui::MenuItem("DEBUG", nullptr, &vis.debug);
             ImGui::Separator();
@@ -882,6 +885,7 @@ int main(int argc, char** argv) {
         nt::ui::WorkspaceView workspace_view;
         nt::ui::PianoRollView piano_roll_view;
         nt::ui::NoteEntryView note_entry_view;
+        nt::ui::HistoryView history_view;
         nt::ui::ExportView export_view(nt::platform::config_dir() / "export_presets.json");
         nt::midi::MidiInput midi_input;
         nt::midi::MidiOutputPort midi_output;
@@ -1198,6 +1202,9 @@ int main(int argc, char** argv) {
             local_api.process_pending(session, audio);
             if (vis.local_api) {
                 nt::ui::LocalApiView::draw(local_api, settings, *theme);
+            }
+            if (vis.history) {
+                history_view.draw(session, *theme, vis.history);
             }
             export_view.draw(session, *theme, shell.show_export);
             if (clear_startup_focus) {
