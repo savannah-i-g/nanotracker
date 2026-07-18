@@ -122,7 +122,9 @@ private:
 
     // Mixer-thread entry: OpenAL Soft pulls sample data on demand.
     // Must fill the full request — a short return stops the source.
-    static ALsizei AL_APIENTRY pull(void* user, void* sampledata, ALsizei numbytes) {
+    // noexcept matches the 1.25+ callback typedef and converts
+    // implicitly under older headers.
+    static ALsizei AL_APIENTRY pull(void* user, void* sampledata, ALsizei numbytes) noexcept {
         auto* self = static_cast<OpenAlDevice*>(user);
         const rt::RtScope rt_scope;
 
