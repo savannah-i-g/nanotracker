@@ -12,6 +12,7 @@ at Stage 0):
 | OpenAL Soft | audio device | LGPL (dyn) | Linux: system package 1.23.1 (find_package). Windows: FetchContent tag 1.25.2, built and shipped beside the exe (stock OpenAL32.dll lacks the callback extension). Verified at runtime either way |
 | libopenmpt | module playback | BSD-3 | Linux: 0.8.3 vendored static (tools/build_libopenmpt.sh; third_party/, excluded from backups) or system pkg-config (CI). Windows: 0.8.3 upstream VS2022 dev package, URL_HASH-pinned in CMakeLists.txt |
 | RtMidi | MIDI I/O | MIT-like | 6.0.0 (FetchContent tag; ALSA backend, libasound2-dev installed 2026-07-18) |
+| IXWebSocket | Local API WebSocket server + test loopback client | BSD-3 | v12.0.1 (FetchContent tag; USE_TLS/USE_ZLIB forced off — localhost + bearer token, no new transitive deps) |
 | dr_libs (dr_wav + dr_mp3) | sample decode | PD/MIT | commit 6d78776c2c05 (FetchContent) |
 | stb (stb_vorbis + stb_image) | ogg decode, plugin UI images | PD/MIT | commit f0569113 (FetchContent; decoders.cpp + plugins/image_decode.cpp TUs, warnings suppressed) |
 | libogg + libvorbis | ogg encode | BSD | v1.3.5 / v1.3.7 (FetchContent tags) |

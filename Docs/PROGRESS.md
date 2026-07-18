@@ -3,6 +3,40 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 18 closed — Local API
+
+- Landed: **LocalApiServer** (`api/local_api.{h,cpp}`, IXWebSocket
+  v12.0.1 pinned, TLS/zlib off, BSD-3 licence text + roster row):
+  127.0.0.1-only WebSocket server, web relay-frame protocol kept
+  verbatim (hello/welcome/request/reply/ping), first-message token
+  handshake, protocol triage on server threads with a bounded queue,
+  **`process_pending()` as the single session consumer on the UI
+  frame loop** (contract block in the header), two-phase
+  validate/apply with atomic batches, client tracking + request-log
+  ring. **33 execute ops + 13 queries** covering transport, cells,
+  ranges, samples (incl. base64 binary upload through the standard
+  decode path), instrument table, sequence layers, project
+  load/save/export (full ExportOptions), workspace
+  discovery/nodes/cables, plugin params on all three binding kinds.
+  Web fix-list #5 paid and proven by test: uploads land, discovery
+  exists, bogus IDs → typed errors storing nothing. **LOCAL API
+  window** (`ui/local_api_view`): enable toggle, port, token
+  display/copy/regenerate (crypto-random hex), clients table, log
+  tail; settings persist enabled/port/token (default port 9311).
+  Ops the native session cannot express yet return typed
+  `unsupported` (pattern/order-list structure, channel reshape, seq
+  layer add/remove — recorded as session gaps worth having). One
+  FIXES.md entry (full schema delta in this entry's agent record).
+- Verification: 100/100 both trees (9 new loopback cases driving the
+  REAL server + a real IXWebSocket client: auth reject/accept,
+  transport reflection, setCell diff, getPattern round-trip, typed
+  errors, sample upload frames>0, workspace discovery + cable
+  round-trip, export writes a file); out-of-process smoke against
+  the running app with a raw-RFC6455 Python client (hello→welcome,
+  setCell applied, read-back correct); tidy clean (`src/api` added
+  to the header filter); CI green both platforms.
+- Backup: `NanoTracker_stage18_2026-07-18.tar.gz`; git tag `stage-18`.
+
 ## 2026-07-18 — Stage 17 closed — MIDI completion
 
 - Landed: **runner midi-edge transport** (`audio/midi_event.h`):

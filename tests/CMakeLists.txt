@@ -30,6 +30,8 @@ add_executable(nt_tests
     export_test.cpp
     export_suite_test.cpp
     export_presets_test.cpp
+    local_api_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/api/local_api.cpp
     ${CMAKE_SOURCE_DIR}/src/app/midi_record.cpp
     ${CMAKE_SOURCE_DIR}/src/app/pattern_ops.cpp
     ${CMAKE_SOURCE_DIR}/src/app/project_session.cpp
@@ -78,7 +80,8 @@ target_include_directories(nt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(nt_tests PRIVATE Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json OpenAL::OpenAL dr_libs stb samplerate
-    libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi vorbisenc vorbis ogg ebur128
+    libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi ixwebsocket
+    vorbisenc vorbis ogg ebur128
     ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
 
 # Real .clap binary for host verification (loaded at runtime by

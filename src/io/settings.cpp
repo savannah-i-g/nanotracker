@@ -56,6 +56,9 @@ Settings load_settings(const std::filesystem::path& path) {
     read_if(j, "cable_slack", settings.cable_slack);
     read_if(j, "cable_iterations", settings.cable_iterations);
     read_if(j, "cable_thickness", settings.cable_thickness);
+    read_if(j, "local_api_enabled", settings.local_api_enabled);
+    read_if(j, "local_api_port", settings.local_api_port);
+    read_if(j, "local_api_token", settings.local_api_token);
 
     // Defensive clamps mirroring the web loader (cableSettings.ts:78-83)
     // so corrupted storage can never explode the rope simulator.
@@ -65,6 +68,7 @@ Settings load_settings(const std::filesystem::path& path) {
     settings.cable_slack = std::clamp(settings.cable_slack, 0.5F, 3.0F);
     settings.cable_iterations = std::clamp(settings.cable_iterations, 1, 16);
     settings.cable_thickness = std::clamp(settings.cable_thickness, 0.5F, 16.0F);
+    settings.local_api_port = std::clamp(settings.local_api_port, 1024, 65535);
     return settings;
 }
 
@@ -82,6 +86,9 @@ bool save_settings(const Settings& settings, const std::filesystem::path& path) 
         {"cable_slack", settings.cable_slack},
         {"cable_iterations", settings.cable_iterations},
         {"cable_thickness", settings.cable_thickness},
+        {"local_api_enabled", settings.local_api_enabled},
+        {"local_api_port", settings.local_api_port},
+        {"local_api_token", settings.local_api_token},
     };
 
     std::ofstream file(path);

@@ -1,6 +1,7 @@
 // Application entry point: settings → window → ImGui → theme → CRT
 // pass → audio engine, then the frame loop. The shell UI here is the
 // Stage 1/2 surface; tracker views replace it as they land.
+#include "api/local_api.h"
 #include "app/autosave.h"
 #include "app/input_script.h"
 #include "app/midi_record.h"
@@ -21,6 +22,7 @@
 #include "ui/export_view.h"
 #include "ui/fx_mixer_view.h"
 #include "ui/instrument_table_view.h"
+#include "ui/local_api_view.h"
 #include "ui/midi_view.h"
 #include "ui/module_view.h"
 #include "ui/pattern_view.h"
@@ -506,6 +508,19 @@ int main(int argc, char** argv) {
         nt::app::MidiRecord midi_record(audio, pattern_view);
         nt::ui::MidiView midi_view(midi_input, midi_output, midi_out_thread, midi_learn,
                                    midi_record);
+        // Local API server (constructed after the session: destruction
+        // joins its threads before the session goes away). Server
+        // threads only enqueue; requests execute in the frame loop.
+        nt::api::LocalApiServer local_api;
+        if (settings.local_api_enabled) {
+            if (settings.local_api_token.empty()) {
+                settings.local_api_token = nt::api::generate_token();
+            }
+            if (!local_api.start(settings.local_api_port, settings.local_api_token)) {
+                std::fprintf(stderr, "local api: %s\n", local_api.error().c_str());
+                settings.local_api_enabled = false;
+            }
+        }
 
         if (cli.module_path != nullptr && audio.running()) {
             if (module_view.load_file(audio, module_player, cli.module_path)) {
@@ -717,6 +732,10 @@ int main(int argc, char** argv) {
             // window's device drain: per frame, device notes apply
             // first, then bus notes (each source stays FIFO).
             midi_record.update(session);
+            // Queued Local API requests execute here — the frame loop
+            // is the session's single consumer (api/local_api.h).
+            local_api.process_pending(session, audio);
+            nt::ui::LocalApiView::draw(local_api, settings, *theme);
             export_view.draw(session, *theme, shell.show_export);
             session.update_clap_editors();
             session.sweep_retired();
@@ -730,6 +749,7 @@ int main(int argc, char** argv) {
         }
 
         autosave.end_session();
+        local_api.stop(); // joins server threads before teardown
         audio.stop();
         window.window_size(settings.window_width, settings.window_height);
         if (!nt::io::save_settings(settings, nt::io::default_settings_path())) {

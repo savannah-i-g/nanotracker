@@ -230,3 +230,17 @@ detail as each fix lands.
   transport snapshot — second half of a row rounds UP to the next row
   (`app/midi_record.cpp` `quantise_record_row`); untimed device notes
   are stamped at the latest snapshot and take the same path.
+- **Local API is v1.2 — additive, typed, never silent** (web
+  `trackerLocalApiSchema.ts:104-107` fix-list #5): sample binary
+  upload lands through the standard decode path (the web dropped it);
+  workspace discovery exists (`getWorkspace` enumerates nodes, typed
+  ports, cables); bogus IDs return typed errors
+  (`notFound`/`outOfBounds`/`invalidOp`/`unsupported`) and store
+  nothing (the web silently stored ghost workspace ids). Web ops with
+  no native session surface yet (pattern/order-list structure,
+  channel reshape, seq layer add/remove) return typed `unsupported`
+  rather than pretending; wire cap raised 1 MiB → 64 MiB so uploads
+  fit; queue bounds replace rate limiting (`rateLimited` on
+  overflow); mid-batch I/O failures report the failing index +
+  appliedBeforeFailure (a case the web surface never expressed).
+  Full delta in the stage ledger.

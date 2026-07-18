@@ -198,6 +198,27 @@ FetchContent_Declare(rtmidi
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(rtmidi)
 
+# IXWebSocket — the Local API's WebSocket server (and the test
+# suite's loopback client). BSD-3. TLS and zlib stay off: localhost
+# binding + bearer token per Docs/Plan_PostV1/07-local-api.md, so no
+# new transitive deps (Research/03).
+set(USE_TLS OFF CACHE BOOL "" FORCE)
+set(USE_ZLIB OFF CACHE BOOL "" FORCE)
+set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(ixwebsocket
+    GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+    GIT_TAG v12.0.1
+    GIT_SHALLOW ON)
+FetchContent_MakeAvailable(ixwebsocket)
+# Its headers propagate without SYSTEM; re-export them as SYSTEM so
+# third-party code stays outside our warning gate, and silence its own
+# TUs (same treatment as ebur128/vst3_hosting).
+set_target_properties(ixwebsocket PROPERTIES
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
+        $<TARGET_PROPERTY:ixwebsocket,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_options(ixwebsocket PRIVATE
+    $<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>)
+
 # CLAP — external plugin hosting ABI (header-only C). MIT.
 FetchContent_Declare(clap
     GIT_REPOSITORY https://github.com/free-audio/clap.git
@@ -276,6 +297,7 @@ endif()
 
 add_executable(nanotracker
     ${NT_EDITOR_SURFACE_SOURCE}
+    src/api/local_api.cpp
     src/app/main.cpp
     src/app/input_script.cpp
     src/app/midi_record.cpp
@@ -287,6 +309,7 @@ add_executable(nanotracker
     src/ui/export_view.cpp
     src/ui/fx_mixer_view.cpp
     src/ui/instrument_table_view.cpp
+    src/ui/local_api_view.cpp
     src/ui/pattern_view.cpp
     src/ui/sample_browser_view.cpp
     src/ui/sample_view.cpp
@@ -344,8 +367,8 @@ target_include_directories(nanotracker PRIVATE src include)
 target_link_libraries(nanotracker PRIVATE
     glfw OpenGL::GL imgui glad_gl_core_33 nlohmann_json::nlohmann_json
     OpenAL::OpenAL dr_libs stb samplerate libopenmpt::libopenmpt miniz
-    clap vst3_hosting rtmidi vorbisenc vorbis ogg ebur128 ${CMAKE_DL_LIBS}
-    $<$<BOOL:${UNIX}>:X11::X11>)
+    clap vst3_hosting rtmidi ixwebsocket vorbisenc vorbis ogg ebur128
+    ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
 
 # Third-party single-file codec implementations: warnings are theirs.
 set(NT_SILENCE_WARNINGS $<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>)

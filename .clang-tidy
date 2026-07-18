@@ -39,5 +39,5 @@ Checks: >
 WarningsAsErrors: ''
 # Anchored to this project's module directories; must not match
 # FetchContent trees under build/_deps/*/include/.
-HeaderFilterRegex: '(src/(app|platform|rt|audio|engine|modplay|graph|plugins|ext|midi|ui|io)|include/ntp)/'
+HeaderFilterRegex: '(src/(api|app|platform|rt|audio|engine|modplay|graph|plugins|ext|midi|ui|io)|include/ntp)/'
 FormatStyle: file

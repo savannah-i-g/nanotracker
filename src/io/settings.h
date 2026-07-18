@@ -29,6 +29,13 @@ struct Settings {
     float cable_slack = 1.18F;
     int cable_iterations = 4;
     float cable_thickness = 3.0F;
+
+    // Local API (api/local_api.h): off by default, like the web's
+    // window.nanoTracker gate. The token is generated on first enable
+    // (api::generate_token) and shown in the LOCAL API window.
+    bool local_api_enabled = false;
+    int local_api_port = 9311; // the web relay's conventional port
+    std::string local_api_token;
 };
 
 // Loads settings from `path`. A missing or unreadable file yields
