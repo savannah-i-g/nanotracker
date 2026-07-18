@@ -2,6 +2,11 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+// Wide-character resource macros (IDC_ARROW et al.) to match the
+// explicit W-suffixed API calls below.
+#define UNICODE
+#define _UNICODE
+
 #include <vector>
 #include <windows.h>
 
