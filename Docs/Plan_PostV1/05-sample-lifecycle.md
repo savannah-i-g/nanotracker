@@ -20,6 +20,12 @@ discipline (`project_session.h` retired_ vectors are the pattern):
 - Reclamation frees a retired buffer only after observing a snapshot
   whose pull count proves the audio thread has swapped past every
   bundle that referenced it (RCU-style grace period).
+- *Refined at implementation:* the grace clock is an applied publish
+  serial (kSetBundle/kSwapBundle carry `Command::serial`, echoed back
+  as `EngineSnapshot::bundle_serial`) rather than the raw pull
+  counter — UI-side snapshot reads are wait-free, not fresh, so a
+  retire-time `pulls` stamp cannot bound in-flight pulls and no fixed
+  margin closes the race. Full proof in `audio/sample_reclaim.h`.
 - Voices never outlive their bundle's buffers by construction
   (kSetBundle already deactivates voices; kSwapBundle keeps the same
   sample set — enforced by the publish paths).

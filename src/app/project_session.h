@@ -8,11 +8,14 @@
 // bundle pointer. Cell edits write fixed-size fields in preallocated
 // rows (no reallocation), which is safe against the concurrent reader.
 // Structural edits (pattern add/remove, sample replace) stop the
-// transport first and republish the bundle.
+// transport first and republish the bundle; superseded buffers,
+// bundles, racks and runners retire behind the generation fence in
+// audio/sample_reclaim.h and free once the engine provably lets go.
 #pragma once
 
 #include "app/undo.h"
 #include "audio/audio_engine.h"
+#include "audio/sample_reclaim.h"
 #include "engine/tracker_types.h"
 #include "ext/clap_host.h"
 #include "ext/editor_window.h"
@@ -57,8 +60,18 @@ public:
     bool save_ftrk(const std::filesystem::path& path);
 
     // Offline render of the current project through a fresh engine
-    // (io/export_render.h). UI thread; blocks until encoded.
+    // (io/export_render.h). UI thread; blocks until encoded. The
+    // options overload is the full surface; the format one keeps the
+    // CLI's defaults.
     io::ExportResult export_current(const std::filesystem::path& path, io::ExportFormat format);
+    io::ExportResult export_current(const std::filesystem::path& path,
+                                    const io::ExportOptions& options);
+
+    // Write-time extras exactly as save_ftrk persists them (workspace,
+    // bundled NTP archives, presets, external plugin state, POVR).
+    // Public so export UIs can snapshot value copies for a worker
+    // thread without a temp-file round-trip.
+    [[nodiscard]] io::FtrkWriteExtras assemble_write_extras();
 
     [[nodiscard]] const std::string& error() const { return error_; }
 
@@ -110,6 +123,51 @@ public:
 
     // Sample id → decoded buffer (null when missing/undecodable).
     [[nodiscard]] const audio::SampleBuffer* sample_buffer(int sample_id) const;
+
+    // ── Destructive waveform ops ─────────────────────────────────────
+    // Ranges are half-open [start, end) in frames of the RESIDENT
+    // (device-rate) buffer; end clamps to the buffer length, so
+    // (0, UINT32_MAX) means "whole sample". Each op computes a new
+    // buffer, re-encodes original_data as PCM16 WAV at the device rate
+    // and rebuilds the resident audio by decoding those exact bytes —
+    // what plays IS what FTRK stores (quantisation happens once, per
+    // op, as in the web editor's re-encode). The old buffer retires
+    // behind the reclamation fence and a bounded sample-op undo entry
+    // restores the exact previous buffer object + metadata.
+    //
+    // Loop points (source-rate frames in TrackerSample) are rescaled
+    // into the new device-rate base by every op; trim additionally
+    // shifts them by the cut and clamps into the kept region (cleared
+    // when nothing overlaps). Length-preserving ops (silence, fades,
+    // normalize, reverse, gain, DC removal) leave loop placement
+    // untouched — reverse deliberately keeps the loop window rather
+    // than mirroring it, matching the web editor.
+    //
+    // Returns false with error() set (empty slot, empty range, silent
+    // normalize selection).
+    bool sample_trim(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame);
+    bool sample_silence(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame);
+    bool sample_fade_in(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame,
+                        io::FadeShape shape);
+    bool sample_fade_out(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame,
+                         io::FadeShape shape);
+    // Scales so the range's peak lands on `peak_target` (0..1] — up or
+    // down (the web editor refused peaks near full scale; FIXES.md).
+    bool sample_normalize(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame,
+                          float peak_target);
+    bool sample_reverse(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame);
+    bool sample_gain_db(int sample_id, std::uint32_t start_frame, std::uint32_t end_frame,
+                        float gain_db);
+    // Whole-sample only: subtracts each channel's mean.
+    bool sample_remove_dc(int sample_id);
+
+    // Frees retired audio objects the engine has provably released
+    // (audio/sample_reclaim.h). Called once per frame from the main
+    // loop; disarms permanently if the engine ever dropped a command
+    // (delivery of the unlinking publish becomes unprovable).
+    void sweep_retired();
+
+    [[nodiscard]] const audio::SampleReclaimer& reclaimer() const { return reclaimer_; }
 
     // ── Workspace patch graph ────────────────────────────────────────
     // The UI reads the model directly (window placements are written
@@ -230,9 +288,23 @@ private:
     // Rebuilds the built-in nodes (bus sized to the project's channel
     // count) and clears cables/dormant state. Load and new-project only.
     void rebuild_workspace_nodes();
-    // Live schedule republish via kSwapBundle (project/rack unchanged).
+    // Live schedule republish via kSwapBundle (project/rack/samples
+    // unchanged — the kSwapBundle sender contract).
     void publish_graph();
-    [[nodiscard]] io::FtrkWriteExtras assemble_write_extras();
+    // One structural slot swap: transport stops, the outgoing buffer
+    // retires behind the publish fence, metadata replaces in place and
+    // the bundle republishes. Shared ownership lets undo return the
+    // exact original buffer object to the slot.
+    void replace_sample_buffer(int sample_id, std::shared_ptr<audio::SampleBuffer> buffer,
+                               const engine::TrackerSample& meta);
+    // Common destructive-op scaffold: clamp range, run `edit` on a
+    // copy of the resident audio, re-encode → re-decode, adjust loop
+    // points, swap the slot and push the sample-op undo entry.
+    bool
+    apply_sample_edit(int sample_id, const char* label, std::uint32_t start_frame,
+                      std::uint32_t end_frame, bool trim_to_range,
+                      const std::function<std::vector<float>(const std::vector<float>&,
+                                                             std::uint32_t, std::uint32_t)>& edit);
     // Creates the workspace node + instance for a catalogued plugin.
     std::string spawn_plugin_node(const std::string& plugin_id, const std::string& workspace_id);
     // Wakes dormant WPBR instruments whose plugins are catalogued, then
@@ -245,15 +317,18 @@ private:
     engine::TrackerProject project_;
     UndoStack undo_;
 
-    // Decoded audio, indexed by sample id. Retired bundles are kept
-    // until shutdown so the audio thread can never dangle — structural
-    // sample replacement is rare, and the unbounded retirement lists
-    // are the accepted cost of that guarantee.
-    std::array<std::unique_ptr<audio::SampleBuffer>, engine::kMaxSamples + 1> buffers_{};
-    std::vector<std::unique_ptr<audio::PlaybackBundle>> retired_bundles_;
-    std::vector<std::unique_ptr<audio::FxRack>> retired_racks_;
-    std::vector<std::unique_ptr<audio::GraphRunner>> retired_runners_;
-    audio::PlaybackBundle* live_bundle_ = nullptr;
+    // Decoded audio, indexed by sample id (shared: destructive-op undo
+    // snapshots alias slot buffers; buffers are immutable once built).
+    // Replaced slot buffers and superseded bundles/racks/runners
+    // retire into the reclaimer and free once the engine provably
+    // stops referencing them (audio/sample_reclaim.h fence).
+    std::array<std::shared_ptr<audio::SampleBuffer>, engine::kMaxSamples + 1> buffers_{};
+    std::unique_ptr<audio::PlaybackBundle> live_bundle_;
+    std::unique_ptr<audio::FxRack> live_rack_;
+    std::unique_ptr<audio::GraphRunner> live_runner_;
+    audio::SampleReclaimer reclaimer_;
+    // Monotone kSetBundle/kSwapBundle serial — the reclamation clock.
+    std::uint64_t publish_serial_ = 0;
 
     graph::WorkspaceGraph workspace_;
     graph::DormantEntries workspace_dormant_;

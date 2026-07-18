@@ -287,6 +287,7 @@ add_executable(nanotracker
     src/ui/fx_mixer_view.cpp
     src/ui/instrument_table_view.cpp
     src/ui/pattern_view.cpp
+    src/ui/sample_browser_view.cpp
     src/ui/sample_view.cpp
     src/ui/ntp_ui.cpp
     src/ui/piano_roll_view.cpp
@@ -298,6 +299,7 @@ add_executable(nanotracker
     src/audio/fx_chain.cpp
     src/audio/graph_runner.cpp
     src/audio/sample_buffer.cpp
+    src/audio/sample_reclaim.cpp
     src/engine/sequence_ops.cpp
     src/engine/tracker_engine.cpp
     src/ext/clap_host.cpp

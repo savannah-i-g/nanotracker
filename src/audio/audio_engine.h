@@ -63,6 +63,10 @@ struct EngineSnapshot {
     // Module Player state.
     bool module_playing = false;
     bool song_ended = false;
+    // Serial of the last kSetBundle/kSwapBundle applied, recorded at
+    // the command drain and published at end of pull — the reclamation
+    // fence's proof of progress (audio/sample_reclaim.h).
+    std::uint64_t bundle_serial = 0;
     // MIDI-clock PLL anchor: total frames rendered at the last publish
     // plus the host time it happened — the MIDI thread interpolates
     // between snapshots (midi/midi_out_thread.h).
@@ -70,10 +74,10 @@ struct EngineSnapshot {
     double host_time_seconds = 0.0;
 };
 
-// POD command set (SpscQueue requires trivially copyable). Sample
-// pointers passed here must outlive playback — the registry that loads
-// samples owns them and only frees at shutdown; there is no mid-run
-// reclamation path.
+// POD command set (SpscQueue requires trivially copyable). Sample and
+// bundle pointers passed here must stay alive until the reclamation
+// fence proves the audio thread is past them — the session's
+// SampleReclaimer owns that discipline (audio/sample_reclaim.h).
 struct Command {
     enum class Type : std::uint8_t {
         kToneOn,
@@ -81,10 +85,19 @@ struct Command {
         kToneFreq,
         kPlaySample,
         kStopSample,
-        kSetBundle,      // bundle = new playback bundle (or null to clear)
+        kSetBundle,      // bundle = new playback bundle (or null to
+                         // clear). Deactivates every voice class that
+                         // holds a SampleBuffer* (channel, sequence-
+                         // layer, one-shot preview) — the reclamation
+                         // fence counts on no voice surviving a full
+                         // bundle replacement.
         kSwapBundle,     // live bundle swap: transport, voices and play
-                         // state survive. Only for bundles whose project
-                         // pointer is unchanged (cable/graph edits).
+                         // state survive. Only for bundles whose
+                         // project pointer AND sample set are unchanged
+                         // (cable/graph edits) — surviving voices keep
+                         // raw SampleBuffer*s across the swap, so every
+                         // buffer they can hold must still be
+                         // referenced by the new bundle.
         kTransportPlay,  // start sequencing: aux_int = order-list start
                          // position; aux_int2 = exclusive end bound
                          // (0 = none — normal looped playback; N = park
@@ -113,6 +126,10 @@ struct Command {
     int aux_int = 0;
     int aux_int2 = 0;
     modplay::ModulePlayer* module = nullptr;
+    // kSetBundle/kSwapBundle publish serial for the reclamation fence
+    // (0 = unfenced sender, e.g. the demo path — never rewinds the
+    // engine's running maximum).
+    std::uint64_t serial = 0;
 };
 
 class AudioEngine {
@@ -168,6 +185,7 @@ private:
 
     // Render-thread state (touched only inside render()).
     std::uint64_t pulls_ = 0;
+    std::uint64_t bundle_serial_ = 0;
     bool tone_on_ = false;
     float tone_freq_ = 440.0F;
     double tone_phase_ = 0.0;

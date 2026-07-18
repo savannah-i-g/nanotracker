@@ -21,6 +21,16 @@ public:
     // group is open the entry joins the group instead of the stack.
     void push(std::string label, std::function<void()> undo, std::function<void()> redo);
 
+    // Like push, but the entry counts against kMaxSampleOps instead of
+    // only the overall cap: sample-op closures snapshot whole audio
+    // buffers, and that memory is the honest cost of destructive-edit
+    // undo. Exceeding the cap evicts the oldest sample op AND every
+    // entry older than it, so history stays a contiguous suffix of the
+    // edit sequence (the same truncation shape as the overall cap).
+    // Not for use inside a group — a grouped push degrades to a normal
+    // (uncapped) member.
+    void push_sample_op(std::string label, std::function<void()> undo, std::function<void()> redo);
+
     // Collapses every push between begin_group and the matching
     // end_group into one composite entry under `label` (block edits
     // undo as a unit). Groups nest: only the outermost end_group
@@ -42,11 +52,15 @@ public:
 
     void clear();
 
+    // Depth cap for buffer-snapshot entries (push_sample_op).
+    static constexpr std::size_t kMaxSampleOps = 8;
+
 private:
     struct Entry {
         std::string label;
         std::function<void()> undo;
         std::function<void()> redo;
+        bool sample_op = false;
     };
 
     // Bounded history: oldest entries fall off the front.

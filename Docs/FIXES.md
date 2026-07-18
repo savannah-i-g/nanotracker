@@ -166,3 +166,25 @@ detail as each fix lands.
   per render natively). Recorded candidates if demand appears; the
   "Live Capture (debug)" preset is obsolete by design (it existed to
   work around the ScriptProcessorNode capture path, fixed natively).
+- **Normalize scales down as well as up, to a target**
+  (`WaveformEditor.tsx:278` silently refused any peak ≥ 0.999 and
+  always aimed for full scale): the native op takes a peak target and
+  applies `target/peak` in both directions, so hot samples can be
+  pulled back. Silent selections refuse with a visible error instead
+  of a silent no-op. Pinned by `tests/sample_ops_test.cpp`.
+- **Destructive edits play exactly what they persist** (the web editor
+  kept the un-quantised Float32 buffer resident while saving PCM16 —
+  what played diverged from what a reload decoded): native ops encode
+  the edited audio to PCM16 WAV (`io::encode_wav_pcm16`, the export
+  writer's quantisation) and rebuild the resident buffer by decoding
+  those exact bytes. One LSB of quantisation per op is the honest,
+  reload-stable cost; the round-trip is pinned bit-exact in
+  `tests/sample_ops_test.cpp`.
+- **Equal-power fade shapes in the sample editor are native-only**
+  (`WaveformEditor.tsx:251,260` were linear-only): same envelope
+  formula as the export post chain; the linear grid matches the web
+  exactly (fade-in starts at 0, fade-out ends one step above it).
+- **DC removal is whole-sample only** (web `toolRemoveDC:314` honoured
+  a selection): a partial DC correction introduces a step at the
+  selection edge — a click. Recorded divergence, not an omission;
+  range support returns if a real use case appears.

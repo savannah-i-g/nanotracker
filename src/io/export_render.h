@@ -85,4 +85,11 @@ ExportResult export_project(const engine::TrackerProject& project, const FtrkWri
                             const std::filesystem::path& path, ExportFormat format,
                             std::uint32_t rate, double tail_seconds = 2.0);
 
+// Minimal in-memory PCM16 WAV (classic 16-byte fmt, no metadata) from
+// interleaved stereo — the same quantisation the file writer's PCM16
+// branch applies. The destructive sample editor persists edited
+// buffers through this so what FTRK stores is exactly what re-decodes.
+std::vector<std::uint8_t> encode_wav_pcm16(const std::vector<float>& interleaved,
+                                           std::uint32_t rate);
+
 } // namespace nt::io

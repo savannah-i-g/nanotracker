@@ -1,9 +1,6 @@
 #include "ui/export_view.h"
 
-#include "io/ftrk_reader.h"
-
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -421,35 +418,9 @@ void ExportView::launch_export(app::ProjectSession& session) {
 
     // The renderer needs the project plus its write extras (bundled
     // plugins, workspace, presets, POVR) so the offline session matches
-    // a load. The session assembles extras privately, so round-trip
-    // them through its own saver: stage a .ftrk, read it back, and keep
-    // only value types. The project itself is copied directly (the
-    // reader splits FXMX out of the project; the live copy is already
-    // complete).
-    const auto stamp = static_cast<unsigned long long>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    const std::filesystem::path staged_path = std::filesystem::temp_directory_path() /
-                                              ("nt_export_ui_" + std::to_string(stamp) + ".ftrk");
-    if (!session.save_ftrk(staged_path)) {
-        status_ = "export staging failed: " + session.error();
-        last_export_ok_ = false;
-        return;
-    }
-    std::string read_error;
-    auto staged = io::read_ftrk_file(staged_path, read_error);
-    std::error_code ec;
-    std::filesystem::remove(staged_path, ec);
-    if (!staged.has_value()) {
-        status_ = "export staging failed: " + read_error;
-        last_export_ok_ = false;
-        return;
-    }
-    io::FtrkWriteExtras extras;
-    extras.workspace_json = std::move(staged->extras.workspace_json);
-    extras.plugins = std::move(staged->extras.plugins);
-    extras.pprs_json = std::move(staged->extras.pprs_json);
-    extras.povr_raw = std::move(staged->extras.povr_raw);
-    extras.external = std::move(staged->extras.external);
+    // a load. Both snapshot here on the UI thread as value copies; the
+    // worker never touches the session.
+    io::FtrkWriteExtras extras = session.assemble_write_extras();
 
     status_.clear();
     last_files_.clear();

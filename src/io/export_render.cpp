@@ -555,6 +555,43 @@ std::filesystem::path staging_path() {
 
 } // namespace
 
+std::vector<std::uint8_t> encode_wav_pcm16(const std::vector<float>& interleaved,
+                                           std::uint32_t rate) {
+    const auto frames = static_cast<std::uint32_t>(interleaved.size() / 2);
+    const std::uint32_t data_bytes = frames * 4; // stereo PCM16
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(44 + data_bytes);
+    const auto u32 = [&bytes](std::uint32_t v) {
+        for (int b = 0; b < 4; ++b) {
+            bytes.push_back(static_cast<std::uint8_t>((v >> (8 * b)) & 0xFF));
+        }
+    };
+    const auto u16 = [&bytes](std::uint16_t v) {
+        bytes.push_back(static_cast<std::uint8_t>(v & 0xFF));
+        bytes.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+    };
+    const auto id = [&bytes](const char* four) { bytes.insert(bytes.end(), four, four + 4); };
+    id("RIFF");
+    u32(4 + (8 + 16) + (8 + data_bytes));
+    id("WAVE");
+    id("fmt ");
+    u32(16);
+    u16(1); // PCM
+    u16(2);
+    u32(rate);
+    u32(rate * 4);
+    u16(4);
+    u16(16);
+    id("data");
+    u32(data_bytes);
+    for (const float sample : interleaved) {
+        // Identical quantisation to write_wav's PCM16 branch.
+        const auto v = static_cast<std::int16_t>(std::clamp(sample, -1.0F, 1.0F) * 32767.0F);
+        u16(static_cast<std::uint16_t>(v));
+    }
+    return bytes;
+}
+
 ExportResult export_project(const engine::TrackerProject& project, const FtrkWriteExtras& extras,
                             const std::filesystem::path& path, const ExportOptions& options) {
     ExportResult result;

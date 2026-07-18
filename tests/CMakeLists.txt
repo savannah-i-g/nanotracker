@@ -16,6 +16,8 @@ add_executable(nt_tests
     s3m_import_test.cpp
     it_import_test.cpp
     session_test.cpp
+    sample_ops_test.cpp
+    sample_reclaim_test.cpp
     pattern_ops_test.cpp
     sequence_ops_test.cpp
     fx_chain_test.cpp
@@ -36,6 +38,7 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/audio/fx_chain.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/graph_runner.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/sample_buffer.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/sample_reclaim.cpp
     ${CMAKE_SOURCE_DIR}/src/graph/graph_compile.cpp
     ${CMAKE_SOURCE_DIR}/src/graph/graph_model.cpp
     ${CMAKE_SOURCE_DIR}/src/graph/graph_wpbr.cpp

@@ -3,6 +3,73 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 16 closed — Sample lifecycle + waveform editing
+
+- Landed: **generation-fenced reclamation**
+  (`audio/sample_reclaim.{h,cpp}`): retired SampleBuffers, bundles,
+  racks and runners free once the engine provably lets go — v1's
+  grow-forever retirement lists are gone. One spec refinement over
+  `Plan_PostV1/05`: the grace clock is an **applied publish serial**
+  (kSetBundle/kSwapBundle carry `Command::serial`; the engine echoes
+  it in `EngineSnapshot::bundle_serial`) rather than the raw pull
+  counter — UI-side snapshot reads may lag by whole pulls, so a
+  pull-stamp cannot bound in-flight pulls; the serial echo is exact
+  (full proof in the `sample_reclaim.h` header). Fail-safes: a
+  dropped engine command permanently disarms sweeping
+  (keep-until-shutdown, never use-after-free); kSetBundle now also
+  resets sequence-layer voices and the one-shot preview voice (both
+  previously survived holding `SampleBuffer*`s — a latent
+  use-after-free once buffers could actually free). The session
+  sweeps once per frame from the main loop
+  (`ProjectSession::sweep_retired`, next to `update_clap_editors`).
+  **Destructive waveform ops** on ProjectSession (trim / silence /
+  fades linear+equal-power / normalize-to-target / reverse / gain dB /
+  DC removal), each: new buffer at device rate, `original_data`
+  re-encoded PCM16 WAV via the export writer's quantisation
+  (`io::encode_wav_pcm16`), resident audio rebuilt by decoding the
+  persisted bytes (play == persist, bit-exact), loop points rescaled
+  into the device-rate base (trim shifts and clamps; reverse keeps
+  the loop window), old buffer retired behind the fence. **Bounded
+  sample-op undo** (`UndoStack::push_sample_op`, depth 8): closures
+  re-install the exact previous buffer object (shared with the
+  reclaimer), so round-trips are byte-identical; eviction truncates
+  older history with the evictee to keep the stack a contiguous
+  suffix. **Stage 15 debt folded in**: `assemble_write_extras()` is
+  public and `export_current(path, ExportOptions)` exists;
+  `ui/export_view.cpp` snapshots extras directly (temp-ftrk
+  round-trip deleted, threading unchanged). Four FIXES.md entries.
+- UI half: **sample view** (`ui/sample_view`) gains click-drag
+  selection (half-open device-rate range, shaded + frames/seconds
+  readout), zoom-to-selection / full / ctrl+wheel zoom about the
+  cursor with a proportional scrollbar, min/max-envelope windowed
+  drawing, and the op toolbar (TRIM selection-only, SILENCE, FADE
+  IN/OUT with LIN/EQP toggle, NORM target slider, REVERSE, GAIN ±24dB,
+  DC FIX whole-sample-only with explanatory disabled tooltip);
+  selection re-reconciles mid-frame after each op (buffer swaps).
+  Load-by-path is gone: **SAMPLE BROWSER** window
+  (`ui/sample_browser_view`): dirs-first listing filtered to
+  .wav/.ogg/.mp3 (what decoders.cpp decodes), audition on select,
+  double-click loads the selected slot. Fixed en route:
+  `load_sample_into_slot` wrote resident (device-rate) frame counts
+  against the source rate in TrackerSample meta — frames now derive
+  back into the source-rate domain of original_data.
+- Recorded (not built): a session-level preview-file API
+  (reclaimer-backed) — browser audition currently decodes through the
+  shell's process-lifetime registry, the same contract load&play used.
+- Verification: 76/76 both trees (14 new: fence unit tests with fake
+  serial sequences incl. staged-commit and disarm pinning; per-op
+  determinism; PCM16 re-decode bit-exactness; bounded-undo eviction +
+  exact round-trip; live-engine reclamation stress asserting
+  freed-counter advance and full drain — repeated clean under
+  ASan/UBSan); clang-tidy clean on all touched files; app runs with
+  the per-frame sweep (`--frames`, ASan+LSan clean at exit); scripted
+  UI runs on BOTH trees (browser listing filters correctly, sample
+  loads into slot 01, selection readout exact, reverse visibly flips
+  the selected window, Ctrl+Z restores pixel-identical waveform +
+  meta, zoom shows ~12 cycles of the 60Hz fixture across 0.206s —
+  frequency math checks out); CI green both platforms.
+- Backup: `NanoTracker_stage16_2026-07-18.tar.gz`; git tag `stage-16`.
+
 ## 2026-07-18 — Stage 15 closed — Export suite
 
 - Landed: **ExportOptions** through `io/export_render` — order range

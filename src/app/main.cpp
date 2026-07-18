@@ -24,6 +24,7 @@
 #include "ui/module_view.h"
 #include "ui/pattern_view.h"
 #include "ui/piano_roll_view.h"
+#include "ui/sample_browser_view.h"
 #include "ui/sample_view.h"
 #include "ui/theme.h"
 #include "ui/workspace_view.h"
@@ -485,6 +486,7 @@ int main(int argc, char** argv) {
         ShellState shell;
         nt::ui::PatternView pattern_view;
         nt::ui::SampleView sample_view;
+        nt::ui::SampleBrowserView sample_browser_view;
         nt::modplay::ModulePlayer module_player;
         nt::ui::ModuleView module_view;
         nt::ui::WorkspaceView workspace_view;
@@ -693,6 +695,10 @@ int main(int argc, char** argv) {
             pattern_view.draw(session, audio.snapshot(), *theme);
             module_view.draw(audio, module_player, *theme);
             sample_view.draw(session, *theme);
+            // Auditioned files join `samples` (process-lifetime, same
+            // contract as load & play); loads target the slot selected
+            // in the SAMPLES window.
+            sample_browser_view.draw(session, audio, samples, sample_view.selected_slot(), *theme);
             nt::ui::InstrumentTableView::draw(session, *theme);
             nt::ui::FxMixerView::draw(session, *theme);
             workspace_view.draw(session, settings, *theme);
@@ -700,6 +706,7 @@ int main(int argc, char** argv) {
             midi_view.draw(session, *theme);
             export_view.draw(session, *theme, shell.show_export);
             session.update_clap_editors();
+            session.sweep_retired();
             nt::platform::ImGuiHost::end_frame();
 
             crt.end(settings.crt_enabled, settings.crt_intensity);

@@ -95,18 +95,31 @@ void AudioEngine::drain_commands() {
             break;
         case Command::Type::kSetBundle:
             bundle_ = command.bundle;
+            // Running max: fenced publishes are FIFO from one sender,
+            // but unfenced senders (serial 0) must not rewind the
+            // reclamation clock (audio/sample_reclaim.h).
+            bundle_serial_ = std::max(bundle_serial_, command.serial);
             transport_playing_ = false;
             transport_end_bound_ = 0;
             channel_mask_ = 0xFFFFFFFFU;
+            // A full replacement may retire sample buffers, so every
+            // voice class holding a SampleBuffer* resets with it —
+            // channel voices, sequence-layer voices and the one-shot
+            // preview alike (the reclamation fence counts on this).
             for (ChannelVoice& v : voices_) {
                 v.active = false;
             }
+            for (SeqVoice& v : seq_voices_) {
+                v.active = false;
+            }
+            voice_sample_ = nullptr;
             break;
         case Command::Type::kSwapBundle:
-            // Live swap for cable/graph edits: the project pointer is
-            // unchanged (sender contract), so transport position,
-            // voices and play state all stay valid.
+            // Live swap for cable/graph edits: the project pointer and
+            // sample set are unchanged (sender contract), so transport
+            // position, voices and play state all stay valid.
             bundle_ = command.bundle;
+            bundle_serial_ = std::max(bundle_serial_, command.serial);
             break;
         case Command::Type::kTransportPlay:
             if (bundle_ != nullptr && bundle_->project != nullptr) {
@@ -539,6 +552,7 @@ void AudioEngine::render(float* interleaved, std::uint32_t frames) {
     snap.peak_r = peak_r;
     snap.sample_rate = sample_rate_;
     snap.pulls = pulls_;
+    snap.bundle_serial = bundle_serial_;
     snap.tone_active = tone_on_;
     snap.voice_active = voice_sample_ != nullptr;
     snap.transport_playing = transport_playing_;

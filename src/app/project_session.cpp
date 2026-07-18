@@ -14,8 +14,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <numbers>
 #include <utility>
 
 namespace nt::app {
@@ -35,7 +37,7 @@ void ProjectSession::new_project() {
     project_ = engine::create_project(4);
     undo_.clear();
     for (auto& buffer : buffers_) {
-        buffer.reset();
+        reclaimer_.stage(std::move(buffer)); // freed once the publish below lands
     }
     rebuild_workspace_nodes();
     publish_bundle();
@@ -241,9 +243,17 @@ io::ExportResult ProjectSession::export_current(const std::filesystem::path& pat
                               audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000);
 }
 
+io::ExportResult ProjectSession::export_current(const std::filesystem::path& path,
+                                                const io::ExportOptions& options) {
+    stop();
+    return io::export_project(project_, assemble_write_extras(), path, options);
+}
+
 void ProjectSession::decode_samples() {
+    // Old buffers stay reachable through the live bundle until the
+    // caller's publish_bundle() — staged, not freed (sample_reclaim.h).
     for (auto& buffer : buffers_) {
-        buffer.reset();
+        reclaimer_.stage(std::move(buffer));
     }
     for (const engine::TrackerSample& sample : project_.samples) {
         if (sample.id < 1 || sample.id > engine::kMaxSamples) {
@@ -269,22 +279,29 @@ void ProjectSession::publish_bundle() {
     auto rack = std::make_unique<audio::FxRack>(
         project_.fx_mixer, audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000);
     bundle->fx_rack = rack.get();
-    retired_racks_.push_back(std::move(rack));
     auto runner =
         std::make_unique<audio::GraphRunner>(workspace_, graph::compile_graph(workspace_));
     bind_plugins(*runner, *bundle);
     bundle->graph = runner.get();
-    retired_runners_.push_back(std::move(runner));
     for (int id = 1; id <= engine::kMaxSamples; ++id) {
         bundle->samples_by_id[static_cast<std::size_t>(id)] =
             buffers_[static_cast<std::size_t>(id)].get();
     }
-    live_bundle_ = bundle.get();
-    retired_bundles_.push_back(std::move(bundle));
     audio_.send({.type = audio::Command::Type::kSetBundle,
                  .value = 0.0F,
                  .sample = nullptr,
-                 .bundle = live_bundle_});
+                 .bundle = bundle.get(),
+                 .serial = ++publish_serial_});
+    // This publish removes the audio thread's route to the previous
+    // bundle set and to any staged buffers; all of it frees once the
+    // engine proves it applied this serial (sample_reclaim.h fence).
+    reclaimer_.retire(std::move(live_bundle_), publish_serial_);
+    reclaimer_.retire(std::move(live_rack_), publish_serial_);
+    reclaimer_.retire(std::move(live_runner_), publish_serial_);
+    reclaimer_.commit_staged(publish_serial_);
+    live_bundle_ = std::move(bundle);
+    live_rack_ = std::move(rack);
+    live_runner_ = std::move(runner);
 }
 
 void ProjectSession::rebuild_workspace_nodes() {
@@ -307,20 +324,27 @@ void ProjectSession::publish_graph() {
         return;
     }
     // Same project, rack and samples; only the schedule changes — so
-    // the swap is live and FX tails/transport survive.
+    // the swap is live and FX tails/transport survive. The bundle copy
+    // below is what enforces kSwapBundle's same-sample-set contract:
+    // samples_by_id carries over verbatim, and every path that touches
+    // buffers_ republishes through publish_bundle instead (which is
+    // also why staged buffer retirements never commit here — a swap
+    // does not unlink them).
     auto runner =
         std::make_unique<audio::GraphRunner>(workspace_, graph::compile_graph(workspace_));
     auto bundle = std::make_unique<audio::PlaybackBundle>(*live_bundle_);
     bundle->plugin_by_slot.fill(nullptr);
     bind_plugins(*runner, *bundle);
     bundle->graph = runner.get();
-    retired_runners_.push_back(std::move(runner));
-    live_bundle_ = bundle.get();
-    retired_bundles_.push_back(std::move(bundle));
     audio_.send({.type = audio::Command::Type::kSwapBundle,
                  .value = 0.0F,
                  .sample = nullptr,
-                 .bundle = live_bundle_});
+                 .bundle = bundle.get(),
+                 .serial = ++publish_serial_});
+    reclaimer_.retire(std::move(live_bundle_), publish_serial_);
+    reclaimer_.retire(std::move(live_runner_), publish_serial_);
+    live_bundle_ = std::move(bundle);
+    live_runner_ = std::move(runner);
 }
 
 namespace {
@@ -1021,7 +1045,14 @@ bool ProjectSession::load_sample_into_slot(int slot, const std::filesystem::path
     meta.original_data = bytes;
     meta.sample_rate = buffer->source_rate;
     meta.num_channels = 1;
-    meta.frames = buffer->frames;
+    // frames counts in the source-rate domain of original_data — the
+    // resident buffer is device-rate, so its frame count belongs to a
+    // different base than meta.sample_rate.
+    meta.frames = buffer->rate != 0
+                      ? static_cast<std::uint32_t>(std::llround(
+                            static_cast<double>(buffer->frames) *
+                            static_cast<double>(buffer->source_rate) / buffer->rate))
+                      : buffer->frames;
     buffer->name = meta.name;
 
     // Replace or insert the slot's metadata (single move at the end
@@ -1038,9 +1069,10 @@ bool ProjectSession::load_sample_into_slot(int slot, const std::filesystem::path
     } else {
         project_.samples.push_back(std::move(meta));
     }
+    reclaimer_.stage(std::move(buffers_[static_cast<std::size_t>(slot)]));
     buffers_[static_cast<std::size_t>(slot)] = std::move(buffer);
-    // Structural change: history refers to freed audio, so it clears
-    // (matches the web app's slot-load behaviour).
+    // Structural change: history refers to retiring audio, so it
+    // clears (matches the web app's slot-load behaviour).
     undo_.clear();
     publish_bundle();
     return true;
@@ -1053,7 +1085,7 @@ void ProjectSession::clear_slot(int slot) {
                        [slot](const engine::TrackerSample& s) { return s.id == slot; }),
         project_.samples.end());
     if (slot >= 1 && slot <= engine::kMaxSamples) {
-        buffers_[static_cast<std::size_t>(slot)].reset();
+        reclaimer_.stage(std::move(buffers_[static_cast<std::size_t>(slot)]));
     }
     undo_.clear();
     publish_bundle();
@@ -1228,6 +1260,283 @@ const audio::SampleBuffer* ProjectSession::sample_buffer(int sample_id) const {
         return nullptr;
     }
     return buffers_[static_cast<std::size_t>(sample_id)].get();
+}
+
+// ── Destructive waveform ops ─────────────────────────────────────────
+
+namespace {
+
+// Fade envelope at position t in [0,1): linear ramp or equal-power
+// quarter-sine — the same shapes (and formula) as io/export_post.
+float fade_gain(io::FadeShape shape, double t) {
+    return static_cast<float>(
+        shape == io::FadeShape::kEqualPower ? std::sin(t * std::numbers::pi / 2.0) : t);
+}
+
+} // namespace
+
+void ProjectSession::replace_sample_buffer(int sample_id,
+                                           std::shared_ptr<audio::SampleBuffer> buffer,
+                                           const engine::TrackerSample& meta) {
+    stop();
+    reclaimer_.stage(std::move(buffers_[static_cast<std::size_t>(sample_id)]));
+    buffers_[static_cast<std::size_t>(sample_id)] = std::move(buffer);
+    engine::TrackerSample* dest = nullptr;
+    for (engine::TrackerSample& existing : project_.samples) {
+        if (existing.id == sample_id) {
+            dest = &existing;
+            break;
+        }
+    }
+    if (dest != nullptr) {
+        *dest = meta;
+    } else {
+        project_.samples.push_back(meta);
+    }
+    publish_bundle(); // commits the staged retirement behind the fence
+}
+
+bool ProjectSession::apply_sample_edit(
+    int sample_id, const char* label, std::uint32_t start_frame, std::uint32_t end_frame,
+    bool trim_to_range,
+    const std::function<std::vector<float>(const std::vector<float>&, std::uint32_t,
+                                           std::uint32_t)>& edit) {
+    if (sample_id < 1 || sample_id > engine::kMaxSamples) {
+        error_ = "invalid sample slot";
+        return false;
+    }
+    const std::shared_ptr<audio::SampleBuffer> old_buffer =
+        buffers_[static_cast<std::size_t>(sample_id)];
+    engine::TrackerSample* meta_ptr = nullptr;
+    for (engine::TrackerSample& existing : project_.samples) {
+        if (existing.id == sample_id) {
+            meta_ptr = &existing;
+            break;
+        }
+    }
+    if (old_buffer == nullptr || meta_ptr == nullptr) {
+        error_ = "no sample in slot " + std::to_string(sample_id);
+        return false;
+    }
+    const engine::TrackerSample old_meta = *meta_ptr;
+    const std::uint32_t start = std::min(start_frame, old_buffer->frames);
+    const std::uint32_t end = std::clamp(end_frame, start, old_buffer->frames);
+    if (start >= end) {
+        error_ = "empty sample range";
+        return false;
+    }
+
+    const std::vector<float> edited = edit(old_buffer->interleaved, start, end);
+    // Persist-then-decode: the resident buffer is rebuilt from the
+    // exact bytes FTRK will store, so playback == persistence and the
+    // PCM16 quantisation happens exactly once per op.
+    std::vector<std::uint8_t> encoded = io::encode_wav_pcm16(edited, old_buffer->rate);
+    std::string format;
+    std::string decode_error;
+    const std::shared_ptr<audio::SampleBuffer> new_buffer = audio::load_sample_memory(
+        encoded.data(), encoded.size(), old_buffer->rate, format, decode_error);
+    if (new_buffer == nullptr) {
+        error_ = "sample re-encode failed: " + decode_error;
+        return false;
+    }
+    new_buffer->name = old_meta.name;
+
+    engine::TrackerSample new_meta = old_meta;
+    new_meta.original_data = std::move(encoded);
+    new_meta.format = "wav";
+    new_meta.sample_rate = new_buffer->source_rate; // == device rate now
+    new_meta.num_channels = 2;
+    new_meta.frames = new_buffer->frames;
+    // Loop points: stored in source-rate frames, edited in resident
+    // frames — rescale into the new base (identity once a sample has
+    // been edited before), then shift/clamp when the op cut material.
+    const double loop_scale = old_meta.sample_rate != 0
+                                  ? static_cast<double>(old_buffer->rate) / old_meta.sample_rate
+                                  : 1.0;
+    double loop_start = old_meta.loop_start * loop_scale;
+    double loop_end = loop_start + (old_meta.loop_length * loop_scale);
+    if (trim_to_range) {
+        loop_start -= start;
+        loop_end -= start;
+    }
+    const auto new_frames = static_cast<double>(new_buffer->frames);
+    loop_start = std::clamp(loop_start, 0.0, new_frames);
+    loop_end = std::clamp(loop_end, loop_start, new_frames);
+    if (old_meta.loop_length > 0 && loop_end > loop_start) {
+        new_meta.loop_start = static_cast<std::uint32_t>(std::lround(loop_start));
+        new_meta.loop_length = static_cast<std::uint32_t>(std::lround(loop_end - loop_start));
+    } else {
+        new_meta.loop_start = 0;
+        new_meta.loop_length = 0; // loop fell entirely outside the cut
+    }
+
+    replace_sample_buffer(sample_id, new_buffer, new_meta);
+
+    // Snapshot closures: both directions re-install their exact buffer
+    // object (shared with the reclaimer/slot), so a round-trip is
+    // byte-identical, not a recompute.
+    ProjectSession* self = this;
+    undo_.push_sample_op(
+        label,
+        [self, sample_id, old_buffer, old_meta] {
+            self->replace_sample_buffer(sample_id, old_buffer, old_meta);
+        },
+        [self, sample_id, new_buffer, new_meta] {
+            self->replace_sample_buffer(sample_id, new_buffer, new_meta);
+        });
+    return true;
+}
+
+bool ProjectSession::sample_trim(int sample_id, std::uint32_t start_frame,
+                                 std::uint32_t end_frame) {
+    return apply_sample_edit(
+        sample_id, "trim sample", start_frame, end_frame, /*trim_to_range=*/true,
+        [](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            return std::vector<float>(in.begin() + static_cast<std::ptrdiff_t>(start) * 2,
+                                      in.begin() + static_cast<std::ptrdiff_t>(end) * 2);
+        });
+}
+
+bool ProjectSession::sample_silence(int sample_id, std::uint32_t start_frame,
+                                    std::uint32_t end_frame) {
+    return apply_sample_edit(
+        sample_id, "silence range", start_frame, end_frame, false,
+        [](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            std::vector<float> out = in;
+            std::fill(out.begin() + static_cast<std::ptrdiff_t>(start) * 2,
+                      out.begin() + static_cast<std::ptrdiff_t>(end) * 2, 0.0F);
+            return out;
+        });
+}
+
+bool ProjectSession::sample_fade_in(int sample_id, std::uint32_t start_frame,
+                                    std::uint32_t end_frame, io::FadeShape shape) {
+    return apply_sample_edit(
+        sample_id, "fade in", start_frame, end_frame, false,
+        [shape](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            std::vector<float> out = in;
+            const auto len = static_cast<double>(end - start);
+            for (std::uint32_t i = start; i < end; ++i) {
+                // t = i/len as in the web editor: starts exactly at 0.
+                const float g = fade_gain(shape, static_cast<double>(i - start) / len);
+                out[static_cast<std::size_t>(i) * 2] *= g;
+                out[(static_cast<std::size_t>(i) * 2) + 1] *= g;
+            }
+            return out;
+        });
+}
+
+bool ProjectSession::sample_fade_out(int sample_id, std::uint32_t start_frame,
+                                     std::uint32_t end_frame, io::FadeShape shape) {
+    return apply_sample_edit(
+        sample_id, "fade out", start_frame, end_frame, false,
+        [shape](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            std::vector<float> out = in;
+            const auto len = static_cast<double>(end - start);
+            for (std::uint32_t i = start; i < end; ++i) {
+                // Mirror of fade-in: g(1 - t), full level at the start.
+                const float g = fade_gain(shape, 1.0 - (static_cast<double>(i - start) / len));
+                out[static_cast<std::size_t>(i) * 2] *= g;
+                out[(static_cast<std::size_t>(i) * 2) + 1] *= g;
+            }
+            return out;
+        });
+}
+
+bool ProjectSession::sample_normalize(int sample_id, std::uint32_t start_frame,
+                                      std::uint32_t end_frame, float peak_target) {
+    const audio::SampleBuffer* buffer = sample_buffer(sample_id);
+    if (buffer == nullptr) {
+        error_ = "no sample in slot " + std::to_string(sample_id);
+        return false;
+    }
+    const std::uint32_t start = std::min(start_frame, buffer->frames);
+    const std::uint32_t end = std::clamp(end_frame, start, buffer->frames);
+    float peak = 0.0F;
+    for (std::size_t i = static_cast<std::size_t>(start) * 2; i < static_cast<std::size_t>(end) * 2;
+         ++i) {
+        peak = std::max(peak, std::abs(buffer->interleaved[i]));
+    }
+    if (peak <= 0.0F) {
+        error_ = "selection is silent — nothing to normalize";
+        return false;
+    }
+    // Scales down as well as up (the web editor refused near-full-scale
+    // peaks — WaveformEditor.tsx:278; FIXES.md).
+    const float gain = std::clamp(peak_target, 0.0F, 1.0F) / peak;
+    return apply_sample_edit(
+        sample_id, "normalize", start, end, false,
+        [gain](const std::vector<float>& in, std::uint32_t s, std::uint32_t e) {
+            std::vector<float> out = in;
+            for (std::size_t i = static_cast<std::size_t>(s) * 2;
+                 i < static_cast<std::size_t>(e) * 2; ++i) {
+                out[i] *= gain;
+            }
+            return out;
+        });
+}
+
+bool ProjectSession::sample_reverse(int sample_id, std::uint32_t start_frame,
+                                    std::uint32_t end_frame) {
+    return apply_sample_edit(
+        sample_id, "reverse", start_frame, end_frame, false,
+        [](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            std::vector<float> out = in;
+            // Frame-wise reversal: channels keep their pairing.
+            for (std::uint32_t i = 0; i < (end - start) / 2; ++i) {
+                const std::size_t a = static_cast<std::size_t>(start + i) * 2;
+                const std::size_t b = static_cast<std::size_t>(end - 1 - i) * 2;
+                std::swap(out[a], out[b]);
+                std::swap(out[a + 1], out[b + 1]);
+            }
+            return out;
+        });
+}
+
+bool ProjectSession::sample_gain_db(int sample_id, std::uint32_t start_frame,
+                                    std::uint32_t end_frame, float gain_db) {
+    const float mul = std::pow(10.0F, gain_db / 20.0F);
+    return apply_sample_edit(
+        sample_id, "gain", start_frame, end_frame, false,
+        [mul](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            std::vector<float> out = in;
+            for (std::size_t i = static_cast<std::size_t>(start) * 2;
+                 i < static_cast<std::size_t>(end) * 2; ++i) {
+                out[i] *= mul; // over-unity clamps once in the PCM16 encode
+            }
+            return out;
+        });
+}
+
+bool ProjectSession::sample_remove_dc(int sample_id) {
+    return apply_sample_edit(
+        sample_id, "remove DC", 0, UINT32_MAX, false,
+        [](const std::vector<float>& in, std::uint32_t start, std::uint32_t end) {
+            std::vector<float> out = in;
+            const auto frames = static_cast<double>(end - start);
+            double mean_l = 0.0;
+            double mean_r = 0.0;
+            for (std::uint32_t i = start; i < end; ++i) {
+                mean_l += out[static_cast<std::size_t>(i) * 2];
+                mean_r += out[(static_cast<std::size_t>(i) * 2) + 1];
+            }
+            mean_l /= frames;
+            mean_r /= frames;
+            for (std::uint32_t i = start; i < end; ++i) {
+                out[static_cast<std::size_t>(i) * 2] -= static_cast<float>(mean_l);
+                out[(static_cast<std::size_t>(i) * 2) + 1] -= static_cast<float>(mean_r);
+            }
+            return out;
+        });
+}
+
+void ProjectSession::sweep_retired() {
+    // A dropped command makes delivery of an unlinking publish
+    // unprovable, so reclamation fails safe to keep-until-shutdown.
+    if (audio_.dropped_commands() != 0) {
+        reclaimer_.disarm();
+    }
+    reclaimer_.sweep(audio_.snapshot().bundle_serial);
 }
 
 } // namespace nt::app

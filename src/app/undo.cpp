@@ -1,5 +1,6 @@
 #include "app/undo.h"
 
+#include <algorithm>
 #include <memory>
 #include <ranges>
 #include <utility>
@@ -16,6 +17,17 @@ void UndoStack::push(std::string label, std::function<void()> undo, std::functio
         return;
     }
     commit(std::move(entry));
+}
+
+void UndoStack::push_sample_op(std::string label, std::function<void()> undo,
+                               std::function<void()> redo) {
+    if (group_depth_ > 0) {
+        // Composite entries are uncapped; the sample-op budget only
+        // tracks flat entries (see the header note).
+        push(std::move(label), std::move(undo), std::move(redo));
+        return;
+    }
+    commit(Entry{std::move(label), std::move(undo), std::move(redo), /*sample_op=*/true});
 }
 
 void UndoStack::begin_group(std::string label) {
@@ -103,6 +115,21 @@ void UndoStack::commit(Entry entry) {
     undo_stack_.push_back(std::move(entry));
     if (undo_stack_.size() > kMaxEntries) {
         undo_stack_.pop_front();
+    }
+    // Sample ops hold whole-buffer snapshots, so their depth caps
+    // separately: evicting the oldest one truncates everything older
+    // with it, keeping history a contiguous suffix (a mid-stack hole
+    // would let undo reconstruct states that never existed).
+    const auto sample_ops = static_cast<std::size_t>(std::count_if(
+        undo_stack_.begin(), undo_stack_.end(), [](const Entry& e) { return e.sample_op; }));
+    if (sample_ops > kMaxSampleOps) {
+        while (!undo_stack_.empty()) {
+            const bool was_sample_op = undo_stack_.front().sample_op;
+            undo_stack_.pop_front();
+            if (was_sample_op) {
+                break;
+            }
+        }
     }
     // A new edit invalidates the redo branch.
     redo_stack_.clear();
