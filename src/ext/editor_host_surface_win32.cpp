@@ -20,13 +20,19 @@ constexpr const wchar_t* kClassName = L"NanoTrackerPluginEditor";
 // DestroyWindow, so teardown order (plugin gui first) stays with the
 // caller.
 LRESULT CALLBACK surface_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr)
+    auto* state =
+        reinterpret_cast<EditorHostSurfaceState*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_CLOSE) {
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr)
-        auto* closed = reinterpret_cast<bool*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (closed != nullptr) {
-            *closed = true;
+        if (state != nullptr) {
+            state->closed = true;
         }
         return 0;
+    }
+    if (msg == WM_SIZE && state != nullptr && wparam != SIZE_MINIMIZED) {
+        state->resized = true;
+        state->width = LOWORD(lparam);
+        state->height = HIWORD(lparam);
     }
     return ::DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -55,21 +61,23 @@ std::wstring widen(const std::string& utf8) {
     return wide;
 }
 
-constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr DWORD kFixedStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+constexpr DWORD kResizableStyle = kFixedStyle | WS_THICKFRAME | WS_MAXIMIZEBOX;
 
 } // namespace
 
 std::unique_ptr<EditorHostSurface> EditorHostSurface::open(const std::string& title,
                                                            std::uint32_t width,
-                                                           std::uint32_t height,
+                                                           std::uint32_t height, bool resizable,
                                                            std::string& error) {
     if (!register_class_once()) {
         error = "window class registration failed";
         return nullptr;
     }
+    const DWORD style = resizable ? kResizableStyle : kFixedStyle;
     RECT rect{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-    ::AdjustWindowRect(&rect, kStyle, FALSE);
-    HWND hwnd = ::CreateWindowExW(0, kClassName, widen(title).c_str(), kStyle, CW_USEDEFAULT,
+    ::AdjustWindowRect(&rect, style, FALSE);
+    HWND hwnd = ::CreateWindowExW(0, kClassName, widen(title).c_str(), style, CW_USEDEFAULT,
                                   CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
                                   nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
     if (hwnd == nullptr) {
@@ -79,9 +87,12 @@ std::unique_ptr<EditorHostSurface> EditorHostSurface::open(const std::string& ti
 
     auto self = std::unique_ptr<EditorHostSurface>(new EditorHostSurface());
     self->window_ = reinterpret_cast<std::uintptr_t>(hwnd);
+    self->resizable_ = resizable;
+    self->expected_width_ = width;
+    self->expected_height_ = height;
     // The latch address is stable (heap object) and set before the
-    // first pump, which is the only place WM_CLOSE can arrive.
-    ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&self->closed_));
+    // first pump, which is the only place its messages can arrive.
+    ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&self->state_));
     ::ShowWindow(hwnd, SW_SHOW);
     return self;
 }
@@ -95,10 +106,12 @@ EditorHostSurface::~EditorHostSurface() {
 
 void EditorHostSurface::set_size(std::uint32_t width, std::uint32_t height) {
     RECT rect{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
-    ::AdjustWindowRect(&rect, kStyle, FALSE);
+    ::AdjustWindowRect(&rect, resizable_ ? kResizableStyle : kFixedStyle, FALSE);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr)
     ::SetWindowPos(reinterpret_cast<HWND>(window_), nullptr, 0, 0, rect.right - rect.left,
                    rect.bottom - rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    expected_width_ = width;
+    expected_height_ = height;
 }
 
 bool EditorHostSurface::pump() {
@@ -109,7 +122,7 @@ bool EditorHostSurface::pump() {
         ::TranslateMessage(&msg);
         ::DispatchMessageW(&msg);
     }
-    return !closed_;
+    return !state_.closed;
 }
 
 } // namespace nt::ext

@@ -105,8 +105,9 @@ std::unique_ptr<Vst3EditorWindow> Vst3EditorWindow::open(Vst3Plugin& plugin, std
         return nullptr;
     }
     // Surface next: on a headless run this fails before the view is
-    // ever attached.
-    auto surface = EditorHostSurface::open(plugin.name(), 640, 480, error);
+    // ever attached. Resizability is the view's call.
+    const bool resizable = view->canResize() == kResultTrue;
+    auto surface = EditorHostSurface::open(plugin.name(), 640, 480, resizable, error);
     if (surface == nullptr) {
         error += " — parameter panel only";
         return nullptr;
@@ -151,11 +152,22 @@ bool Vst3EditorWindow::update() {
     if (!surface_->pump()) {
         return false;
     }
-    // Plugin resize requests were already answered synchronously by
-    // PlugFrame::resizeView (the SDK requires the onSize ack in the
-    // same callstack); the per-frame work left is the Linux run-loop
-    // dispatch. Multiple editors dispatching the shared loop in one
-    // frame is harmless — timers are deadline-based and fds re-poll.
+    // User resize → constrain through the view, apply, and ack with
+    // onSize. (Plugin-initiated resizes were already answered
+    // synchronously by PlugFrame::resizeView.)
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (surface_->take_resize(width, height) && impl_ != nullptr && impl_->view.get() != nullptr) {
+        ViewRect rect{0, 0, static_cast<int32>(width), static_cast<int32>(height)};
+        if (impl_->view->checkSizeConstraint(&rect) == kResultTrue) {
+            surface_->set_size(static_cast<std::uint32_t>(rect.getWidth()),
+                               static_cast<std::uint32_t>(rect.getHeight()));
+        }
+        impl_->view->onSize(&rect);
+    }
+    // The per-frame work left is the Linux run-loop dispatch.
+    // Multiple editors dispatching the shared loop in one frame is
+    // harmless — timers are deadline-based and fds re-poll.
 #ifndef _WIN32
     Vst3RunLoop::instance().dispatch();
 #endif

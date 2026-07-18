@@ -165,12 +165,16 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
                 // windows attach through the gui extension separately).
                 for (const ext::ClapParamInfo& param : clap->params()) {
                     auto value = static_cast<float>(clap->param_value(param.id));
+                    // Display names may repeat ("Rate" et al); the
+                    // stable param id keys the widget.
+                    ImGui::PushID(static_cast<int>(param.id));
                     ImGui::SetNextItemWidth(160.0F);
                     if (ImGui::SliderFloat(param.name.c_str(), &value,
                                            static_cast<float>(param.min),
                                            static_cast<float>(param.max), "%.3f")) {
                         clap->set_param(param.id, value);
                     }
+                    ImGui::PopID();
                 }
                 if (clap->params().empty()) {
                     ImGui::TextDisabled("no parameters");
@@ -190,10 +194,13 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
                         continue; // synth params number in the hundreds
                     }
                     auto value = static_cast<float>(vst3->param_value(param.id));
+                    // Same duplicate-title hazard as the CLAP panel.
+                    ImGui::PushID(static_cast<int>(param.id));
                     ImGui::SetNextItemWidth(160.0F);
                     if (ImGui::SliderFloat(param.title.c_str(), &value, 0.0F, 1.0F, "%.3f")) {
                         vst3->set_param(param.id, value);
                     }
+                    ImGui::PopID();
                     ++shown;
                 }
                 if (static_cast<int>(vst3->params().size()) > shown) {

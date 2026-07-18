@@ -46,8 +46,9 @@ std::unique_ptr<ClapEditorWindow> ClapEditorWindow::open(ClapPlugin& plugin, std
         return nullptr;
     }
     // Surface first: on a headless run this fails before the plugin
-    // gui is ever created.
-    auto surface = EditorHostSurface::open(plugin.name(), 640, 480, error);
+    // gui is ever created. Resizability is the plugin's call.
+    const bool resizable = gui->can_resize != nullptr && gui->can_resize(plugin.raw());
+    auto surface = EditorHostSurface::open(plugin.name(), 640, 480, resizable, error);
     if (surface == nullptr) {
         error += " — parameter panel only";
         return nullptr;
@@ -94,6 +95,24 @@ ClapEditorWindow::~ClapEditorWindow() {
 bool ClapEditorWindow::update() {
     if (!surface_->pump()) {
         return false;
+    }
+    // User resize → renegotiate with the plugin: adjust_size rounds
+    // to the nearest size the gui accepts, set_size applies it, and
+    // the surface snaps to the adjusted result.
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (surface_->take_resize(width, height)) {
+        const auto* gui = static_cast<const clap_plugin_gui_t*>(
+            plugin_->raw()->get_extension(plugin_->raw(), CLAP_EXT_GUI));
+        if (gui != nullptr) {
+            if (gui->adjust_size != nullptr) {
+                gui->adjust_size(plugin_->raw(), &width, &height);
+            }
+            if (gui->set_size != nullptr) {
+                gui->set_size(plugin_->raw(), width, height);
+            }
+            surface_->set_size(width, height);
+        }
     }
     plugin_->pump_main_thread();
     return true;
