@@ -86,6 +86,13 @@ bool MidiInput::open_virtual_port(const std::string& name, std::string& error) {
         error = "no MIDI backend";
         return false;
     }
+#ifdef _WIN32
+    // WinMM has no virtual ports; RtMidi reports this as a non-throwing
+    // warning, so an honest refusal has to come from us.
+    (void)name;
+    error = "virtual MIDI ports are not supported by the WinMM backend";
+    return false;
+#else
     try {
         impl_->in->openVirtualPort(name);
     } catch (const RtMidiError& e) {
@@ -96,6 +103,7 @@ bool MidiInput::open_virtual_port(const std::string& name, std::string& error) {
     impl_->in->ignoreTypes(true, true, true);
     open_ = true;
     return true;
+#endif
 }
 
 void MidiInput::close_port() {
@@ -161,6 +169,12 @@ bool MidiOutputPort::open_virtual_port(const std::string& name, std::string& err
         error = "no MIDI backend";
         return false;
     }
+#ifdef _WIN32
+    // Same WinMM limitation as MidiInput::open_virtual_port.
+    (void)name;
+    error = "virtual MIDI ports are not supported by the WinMM backend";
+    return false;
+#else
     try {
         impl_->out->openVirtualPort(name);
     } catch (const RtMidiError& e) {
@@ -169,6 +183,7 @@ bool MidiOutputPort::open_virtual_port(const std::string& name, std::string& err
     }
     open_ = true;
     return true;
+#endif
 }
 
 void MidiOutputPort::close_port() {
