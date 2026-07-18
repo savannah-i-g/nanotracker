@@ -10,6 +10,7 @@
 #include "plugins/ntp_voices.h"
 #include "rt/rt_assert.h"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
@@ -94,6 +95,99 @@ std::vector<std::uint8_t> make_segments_wav(const std::vector<float>& freqs, flo
             static_cast<std::uint8_t>((static_cast<std::uint16_t>(v) >> 8) & 0xFF);
     }
     return bytes;
+}
+
+// 16-bit mono PCM helpers shared by the transient/marker fixtures.
+void wav_put32(std::vector<std::uint8_t>& b, std::size_t at, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) {
+        b[at + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
+    }
+}
+
+void wav_put16(std::vector<std::uint8_t>& b, std::size_t at, std::uint16_t v) {
+    b[at] = static_cast<std::uint8_t>(v & 0xFF);
+    b[at + 1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+}
+
+void wav_write_header(std::vector<std::uint8_t>& b, std::uint32_t frames, std::uint32_t rate,
+                      std::uint32_t riff_size) {
+    std::memcpy(b.data(), "RIFF", 4);
+    wav_put32(b, 4, riff_size);
+    std::memcpy(b.data() + 8, "WAVEfmt ", 8);
+    wav_put32(b, 16, 16);
+    wav_put16(b, 20, 1);
+    wav_put16(b, 22, 1);
+    wav_put32(b, 24, rate);
+    wav_put32(b, 28, rate * 2);
+    wav_put16(b, 32, 2);
+    wav_put16(b, 34, 16);
+    std::memcpy(b.data() + 36, "data", 4);
+    wav_put32(b, 40, frames * 2);
+}
+
+// Silence with decaying tone "plucks" (sharp attack, exponential decay,
+// no abrupt cutoff) at the given sample offsets — one clean transient
+// each, spectrally distinct by frequency. Feeds the "transients" slice
+// path: the detector should place a boundary at each pluck.
+std::vector<std::uint8_t> make_pluck_wav(const std::vector<std::uint32_t>& offsets,
+                                         const std::vector<float>& freqs, float seconds,
+                                         std::uint32_t rate) {
+    const auto frames = static_cast<std::uint32_t>(seconds * static_cast<float>(rate));
+    std::vector<float> mono(frames, 0.0F);
+    const auto len = static_cast<std::uint32_t>(0.15F * static_cast<float>(rate));
+    for (std::size_t p = 0; p < offsets.size(); ++p) {
+        for (std::uint32_t i = 0; i < len && offsets[p] + i < frames; ++i) {
+            const float env = std::exp(-static_cast<float>(i) / (0.03F * static_cast<float>(rate)));
+            mono[offsets[p] + i] += 0.7F * env *
+                                    std::sin(2.0F * 3.14159265F * freqs[p] * static_cast<float>(i) /
+                                             static_cast<float>(rate));
+        }
+    }
+    std::vector<std::uint8_t> bytes(44 + (static_cast<std::size_t>(frames) * 2));
+    wav_write_header(bytes, frames, rate, 36 + (frames * 2));
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        const auto v = static_cast<std::int16_t>(mono[i] * 20000.0F);
+        wav_put16(bytes, 44 + (static_cast<std::size_t>(i) * 2), static_cast<std::uint16_t>(v));
+    }
+    return bytes;
+}
+
+// A multi-segment tone WAV (one distinct frequency per segment) carrying
+// a 'cue ' chunk with a cue point at each interior segment boundary.
+// Feeds the "markers" slice path: the loader should slice at the cues.
+std::vector<std::uint8_t> make_cue_wav(const std::vector<float>& freqs, float seg_seconds,
+                                       std::uint32_t rate) {
+    const auto seg_frames = static_cast<std::uint32_t>(seg_seconds * static_cast<float>(rate));
+    const auto nseg = static_cast<std::uint32_t>(freqs.size());
+    const std::uint32_t frames = seg_frames * nseg;
+    const std::uint32_t data_size = frames * 2;
+    const std::uint32_t cue_count = nseg - 1; // interior boundaries only
+    const std::uint32_t cue_size = 4 + (cue_count * 24);
+    const std::uint32_t riff_size = 4 + (8 + 16) + (8 + data_size) + (8 + cue_size);
+    std::vector<std::uint8_t> b(8 + riff_size);
+    wav_write_header(b, frames, rate, riff_size);
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        const float freq = freqs[i / seg_frames];
+        const float s =
+            std::sin(2.0F * 3.14159265F * freq * static_cast<float>(i) / static_cast<float>(rate));
+        wav_put16(b, 44 + (static_cast<std::size_t>(i) * 2),
+                  static_cast<std::uint16_t>(static_cast<std::int16_t>(s * 20000.0F)));
+    }
+    const std::size_t off = 44 + data_size;
+    std::memcpy(b.data() + off, "cue ", 4);
+    wav_put32(b, off + 4, cue_size);
+    wav_put32(b, off + 8, cue_count);
+    for (std::uint32_t i = 0; i < cue_count; ++i) {
+        const std::size_t rec = off + 12 + (static_cast<std::size_t>(i) * 24);
+        const std::uint32_t boundary = (i + 1) * seg_frames;
+        wav_put32(b, rec, i + 1);        // dwName
+        wav_put32(b, rec + 4, boundary); // dwPosition
+        std::memcpy(b.data() + rec + 8, "data", 4);
+        wav_put32(b, rec + 12, 0);        // dwChunkStart
+        wav_put32(b, rec + 16, 0);        // dwBlockStart
+        wav_put32(b, rec + 20, boundary); // dwSampleOffset — the slice boundary
+    }
+    return b;
 }
 
 std::vector<std::uint8_t>
@@ -389,7 +483,7 @@ TEST_CASE("slot and slice validation failures are collected, not thrown", "[ntp]
     std::vector<std::string> errors;
     // Two user-assignable zones sharing a slot id, one with no slot id
     // or fallback, no "userSamples" capability; a slice map with a bad
-    // trigger mode, an inverted slice, a parked detector, and a
+    // trigger mode, an inverted slice, an unknown autoDetect form, and a
     // slot-sourced map referencing a slot that does not exist.
     const std::string bad = R"({
       "ntp": 1, "id": "test.badslots", "name": "BAD", "type": "instrument",
@@ -406,7 +500,7 @@ TEST_CASE("slot and slice validation failures are collected, not thrown", "[ntp]
            "sliceMap": {"source": "break.wav", "triggerMode": "sideways",
                         "slices": [{"start": 0.5, "end": 0.1}]}},
           {"id": "s3", "type": "sampler",
-           "sliceMap": {"source": "break.wav", "autoDetect": "markers"}},
+           "sliceMap": {"source": "break.wav", "autoDetect": "spectral-magic"}},
           {"id": "s4", "type": "sampler",
            "sliceMap": {"source": "slotId:ghost", "autoDetect": "grid:8"}}
         ]
@@ -420,7 +514,7 @@ TEST_CASE("slot and slice validation failures are collected, not thrown", "[ntp]
     CHECK(all.find("needs \"userSamples\" in requires[]") != std::string::npos);
     CHECK(all.find("triggerMode must be") != std::string::npos);
     CHECK(all.find("needs 0 <= start < end") != std::string::npos);
-    CHECK(all.find("\"markers\"") != std::string::npos);
+    CHECK(all.find("autoDetect must be") != std::string::npos);
     CHECK(all.find("unknown slot \"ghost\"") != std::string::npos);
 }
 
@@ -606,6 +700,145 @@ TEST_CASE("slice choke groups cut and round-robin groups rotate", "[ntp]") {
     const std::vector<float> second = render_blocks(instance, 18);
     CHECK(goertzel(first, kRate, 500.0F) > goertzel(first, kRate, 900.0F) * 3.0F);
     CHECK(goertzel(second, kRate, 900.0F) > goertzel(second, kRate, 500.0F) * 3.0F);
+}
+
+// ── Stage 27: transient / marker slicing ─────────────────────────────
+
+TEST_CASE("sliceMap autoDetect \"transients\" slices a break at its onsets", "[ntp]") {
+    // Four decaying plucks at distinct frequencies, one every 0.25 s.
+    // The pluck at frame 0 has no preceding STFT frame, so the detector
+    // reports the three interior onsets and the loader forces slice 0 to
+    // start at 0 — four slices, one pluck each (note 36 + index).
+    const std::vector<std::uint32_t> offsets = {0, 12000, 24000, 36000};
+    const std::vector<float> freqs = {400.0F, 700.0F, 1000.0F, 1400.0F};
+    const std::vector<std::uint8_t> break_wav = make_pluck_wav(offsets, freqs, 1.0F, kRate);
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.transients", "name": "TRANSIENTS", "type": "instrument",
+      "graph": {
+        "nodes": [{"id": "s", "type": "sampler",
+          "sliceMap": {"source": "break.wav", "autoDetect": "transients"}}],
+        "connections": [{"from": "s", "to": "output"}]
+      }
+    })";
+    const std::vector<std::uint8_t> zip = make_zip({
+        {"plugin.json", to_bytes(manifest_json)},
+        {"break.wav", break_wav},
+    });
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+    REQUIRE(plugin->manifest.graph.nodes[0].slice_map.has_value());
+    CHECK(plugin->warnings.empty()); // transients were found, no fallback
+    const auto& slices = plugin->manifest.graph.nodes[0].slice_map->slices;
+    REQUIRE(slices.size() == 4);
+    // Slice 0 always starts at the head; boundaries land near the plucks.
+    CHECK(slices[0].start == 0.0);
+    CHECK(slices[1].start == Catch::Approx(0.25).margin(0.02));
+    CHECK(slices[2].start == Catch::Approx(0.50).margin(0.02));
+    CHECK(slices[3].start == Catch::Approx(0.75).margin(0.02));
+
+    nt::plugins::NtpInstance instance(*plugin, kRate);
+    auto slice_tone = [&](int note) {
+        rt_note_on(instance, note);
+        std::vector<float> mono = render_blocks(instance, 40); // ~107 ms
+        rt_note_off(instance, note);
+        render_blocks(instance, 30); // drain
+        return mono;
+    };
+    // note 36 → slice 0 (400 Hz), note 38 → slice 2 (1000 Hz).
+    const std::vector<float> s0 = slice_tone(36);
+    CHECK(goertzel(s0, kRate, 400.0F) > goertzel(s0, kRate, 1000.0F) * 3.0F);
+    const std::vector<float> s2 = slice_tone(38);
+    CHECK(goertzel(s2, kRate, 1000.0F) > goertzel(s2, kRate, 400.0F) * 3.0F);
+}
+
+TEST_CASE("sliceMap autoDetect \"transients\" falls back on a silent source", "[ntp]") {
+    // Silence carries no transients — honest whole-sample slice + warning.
+    const std::vector<std::uint8_t> quiet = make_wav(0.0F, 0.5F, kRate); // amp 0
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.silent", "name": "SILENT", "type": "instrument",
+      "graph": {
+        "nodes": [{"id": "s", "type": "sampler",
+          "sliceMap": {"source": "q.wav", "autoDetect": "transients"}}],
+        "connections": [{"from": "s", "to": "output"}]
+      }
+    })";
+    const std::vector<std::uint8_t> zip =
+        make_zip({{"plugin.json", to_bytes(manifest_json)}, {"q.wav", quiet}});
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr); // fallback loads, does not refuse
+    const auto& slices = plugin->manifest.graph.nodes[0].slice_map->slices;
+    CHECK(slices.size() == 1);
+    CHECK(slices[0].start == 0.0);
+    CHECK(slices[0].end == Catch::Approx(0.5));
+    bool warned = false;
+    for (const std::string& w : plugin->warnings) {
+        warned = warned || w.find("found no transients") != std::string::npos;
+    }
+    CHECK(warned);
+}
+
+TEST_CASE("sliceMap autoDetect \"markers\" slices at WAV cue points", "[ntp]") {
+    // Four 0.25 s tone segments with cue points at each interior
+    // boundary — the loader slices exactly at the cues.
+    const std::vector<float> freqs = {400.0F, 700.0F, 1000.0F, 1400.0F};
+    const std::vector<std::uint8_t> cue_wav = make_cue_wav(freqs, 0.25F, kRate);
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.markers", "name": "MARKERS", "type": "instrument",
+      "graph": {
+        "nodes": [{"id": "s", "type": "sampler",
+          "sliceMap": {"source": "cue.wav", "autoDetect": "markers"}}],
+        "connections": [{"from": "s", "to": "output"}]
+      }
+    })";
+    const std::vector<std::uint8_t> zip =
+        make_zip({{"plugin.json", to_bytes(manifest_json)}, {"cue.wav", cue_wav}});
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+    REQUIRE(plugin->manifest.graph.nodes[0].slice_map.has_value());
+    const auto& slices = plugin->manifest.graph.nodes[0].slice_map->slices;
+    REQUIRE(slices.size() == 4);
+    CHECK(slices[0].start == 0.0);
+    CHECK(slices[1].start == Catch::Approx(0.25));
+    CHECK(slices[2].start == Catch::Approx(0.50));
+    CHECK(slices[3].start == Catch::Approx(0.75));
+
+    nt::plugins::NtpInstance instance(*plugin, kRate);
+    auto slice_tone = [&](int note) {
+        rt_note_on(instance, note);
+        std::vector<float> mono = render_blocks(instance, 40); // capture ~107 ms
+        rt_note_off(instance, note);
+        render_blocks(instance, 110); // drain: a 0.25 s oneShot slice runs to its end
+        return mono;
+    };
+    const std::vector<float> s1 = slice_tone(37); // slice 1 → 700 Hz
+    CHECK(goertzel(s1, kRate, 700.0F) > goertzel(s1, kRate, 400.0F) * 3.0F);
+    const std::vector<float> s3 = slice_tone(39); // slice 3 → 1400 Hz
+    CHECK(goertzel(s3, kRate, 1400.0F) > goertzel(s3, kRate, 700.0F) * 3.0F);
+}
+
+TEST_CASE("sliceMap autoDetect \"markers\" on a source without cues is refused", "[ntp]") {
+    // A plain WAV (no cue chunk) cannot satisfy "markers" — a collected
+    // error, not a silent one-slice fallback (strict-load philosophy).
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.nocue", "name": "NOCUE", "type": "instrument",
+      "graph": {
+        "nodes": [{"id": "s", "type": "sampler",
+          "sliceMap": {"source": "plain.wav", "autoDetect": "markers"}}],
+        "connections": [{"from": "s", "to": "output"}]
+      }
+    })";
+    const std::vector<std::uint8_t> zip = make_zip(
+        {{"plugin.json", to_bytes(manifest_json)}, {"plain.wav", make_wav(440.0F, 0.2F, kRate)}});
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    CHECK(plugin == nullptr);
+    CHECK(errors_joined(errors).find("has no cue points") != std::string::npos);
 }
 
 // ── Stage 20: convolver uncap ────────────────────────────────────────

@@ -349,6 +349,7 @@ add_executable(nanotracker
     src/audio/convolution_engine.cpp
     src/audio/decoders.cpp
     src/audio/dsp_fft.cpp
+    src/audio/onset_detect.cpp
     src/audio/effect_midi.cpp
     src/audio/fx_chain.cpp
     src/audio/graph_runner.cpp

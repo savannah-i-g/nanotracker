@@ -3,6 +3,34 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 27 closed — Real transient slicing + cue markers
+
+- Landed: **spectral-flux onset detector** (`audio/onset_detect`,
+  pure/off-thread): Hann STFT (~21ms window, 50% hop, power-of-two
+  at source rate), half-wave-rectified magnitude flux, adaptive
+  threshold (local mean + 1.6σ over ±100ms) with an amplitude-relative
+  floor that kills a steady tone's numerical flux, 30ms min-gap
+  peak-pick, cap at the 92-slice note ceiling (strongest-by-flux,
+  deterministic tie-break). Magnitude via `|X|² = X·conj(X)` using a
+  circular time-reversal to get the conjugate spectrum through the
+  pffft convolve path — no change to `dsp_fft`; independently
+  reviewed (circular reversal correct → the layout-blind Σsqrt is the
+  exact one-sided magnitude sum). **autoDetect "transients"** now runs
+  it (was normalised to grid:16); < 1 onset → whole-sample slice +
+  warning. **autoDetect "markers"** now reads WAV `cue ` chunks from
+  the source's raw archive bytes (was a flat refusal); non-WAV/no-cue
+  → collected error. Validation accepts all three forms and resolves
+  them in the post-decode expansion pass. Slice-preview overlay
+  deferred (NTP sampler nodes have no waveform view yet — recorded).
+  Two FIXES.md parked entries moved to shipped.
+- Verification: 157/157 both trees (+9: detector vs known click
+  offsets within one hop at 44.1/48k, level-invariance, sine/DC/
+  silence → 0 onsets, cap determinism; NTP transients fixture slices
+  a 4-pluck break with per-slice trigger by frequency; markers
+  fixture slices at the cues); the FFT magnitude identity
+  spot-verified against the source; tidy/format clean, no NOLINTs.
+- Backup: `NanoTracker_stage27_2026-07-18.tar.gz`; git tag `stage-27`.
+
 ## 2026-07-18 — Stage 26 closed — Undo history panel
 
 - Landed: **HISTORY window** (`ui/history_view`) over the UndoStack —

@@ -267,11 +267,53 @@ detail as each fix lands.
   only "strongly recommended" the fallback and could play silence on
   a fresh install): strict load with collected errors
   (`plugins/ntp_loader.cpp`).
-- **sliceMap autoDetect honesty**: `"transients"` normalises to
-  `grid:16` at load (web v4.1.0's silent runtime fallback, recorded
-  once in the manifest instead); `"markers"` (WAV cue chunks) is
-  refused with a collected error — parked with the transient
-  detector.
+- **sliceMap autoDetect — real transient + marker slicing** (Stage 27;
+  was parked): `"transients"` no longer normalises to `grid:16` (web
+  v4.1.0's silent runtime fallback) and `"markers"` is no longer
+  refused. Both resolve for real in the post-decode expansion
+  (`plugins/ntp_loader.cpp`), filling `map.slices` the runtime already
+  reads (it never distinguishes derived from authored slices). The
+  early validation now *accepts* `transients`/`markers`/`grid:N` and
+  resolves them at expansion, rather than rewriting them at parse.
+  - **`"transients"`** runs a deterministic spectral-flux onset
+    detector (`audio/onset_detect.{h,cpp}`) over the mono-summed decoded
+    buffer. STFT with a Hann window, ~21 ms window rounded to a power of
+    two at the source rate (1024/512 hop at 48 kHz), 50 % overlap;
+    per-frame magnitude spectrum via the project pffft wrapper's public
+    API only — `|X[k]|² = X·conj(X)`, and `conj(X)` is the transform of
+    the circularly time-reversed frame, so `forward + forward +
+    convolve_accumulate` yields the power spectrum without touching
+    pffft's opaque bin layout (no change to `dsp_fft`). Half-wave-
+    rectified flux, adaptive threshold (local mean + 1.6·std over a
+    ±100 ms window) plus a level-invariant magnitude floor, peak-pick
+    with a 30 ms minimum inter-onset gap. Deterministic (no RNG; total-
+    order tie-break by flux then earlier frame). Decisions: the detector
+    emits only interior transient offsets (frame 0 has no preceding STFT
+    frame, so it is never an onset) and the loader forces slice 0 to
+    start at frame 0 — the head is always addressable, no audio dropped
+    ("first onset forced to 0", not "dropped"); offsets are reported at
+    the analysis frame *centre* (`t·hop + window/2`), landing within one
+    hop of the true transient. Onsets are capped to the note ceiling
+    (≤ 92 slices, `kSliceBaseNote`); when more transients exist the
+    strongest by flux are kept. A silent, DC, or untransient source
+    yields a single whole-sample slice plus a collected *warning* — an
+    honest fallback, never a silent mis-slice.
+  - **`"markers"`** parses the WAV `cue ` chunk from the source's raw
+    archive bytes (cue points live in the container, not the decoded
+    floats), converting each `dwSampleOffset` (source-rate frames) to a
+    slice boundary. A non-WAV source or one with no cue points is a
+    collected *error* (not a whole-sample fallback): "markers" is an
+    explicit request the loader cannot satisfy without cues, so the
+    strict-load philosophy applies — the author is told exactly why.
+  - **Deferred — slice preview overlay**: drawing slice boundaries on a
+    sampler node's source was scoped for the stage but has no natural
+    home in native v1. `ui/ntp_ui.cpp` renders only declarative controls
+    (knob/slider/xy/meter/envelope/sprite — no sampler-source waveform),
+    and `ui/sample_view.cpp` edits the tracker's own session sample
+    slots, not an NTP sampler node's slice source. A boundary overlay
+    would first need a waveform view for NTP sampler nodes (a new panel
+    or control kind) — significant surgery — so it is deferred rather
+    than bolted on.
 - **New (native-only): POVR raw carry no longer swallows trailing
   blocks** — the verbatim passthrough read to EOF, duplicating
   PPRS/XPLG inside the raw copy on re-save; the carry is bounded by

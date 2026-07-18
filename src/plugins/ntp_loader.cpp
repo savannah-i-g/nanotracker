@@ -1,6 +1,7 @@
 #include "plugins/ntp_loader.h"
 
 #include "audio/decoders.h"
+#include "audio/onset_detect.h"
 #include "plugins/image_decode.h"
 #include "plugins/ntp_graph.h"
 
@@ -8,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <miniz.h>
 #include <optional>
@@ -256,24 +258,23 @@ ntp::SliceMap parse_slice_map(const json& j, const std::string& node_id,
             errors.push_back("node \"" + node_id +
                              "\": sliceMap has both slices[] and autoDetect — author one");
         }
-        if (map.auto_detect == "transients") {
-            // The web's onset detector never shipped (v4.1.0 fell back
-            // to grid:16); the native detector is parked the same way.
-            // Normalised here so the runtime only ever sees grid.
-            map.auto_detect = "grid:16";
-        }
-        if (map.auto_detect == "markers") {
+        // Known forms are accepted here but resolved post-decode, where
+        // the source is in hand: "transients" runs the onset detector,
+        // "markers" reads the source WAV's cue chunk, "grid:N" chops N
+        // equal slices. Only grid's count is bound now (the note
+        // ceiling); the detected/cue slice count is bound at expansion.
+        const std::optional<int> grid = grid_slice_count(map.auto_detect);
+        const bool known =
+            map.auto_detect == "transients" || map.auto_detect == "markers" || grid.has_value();
+        if (grid.has_value() && (*grid < 1 || ntp::kSliceBaseNote + *grid - 1 > 127)) {
+            errors.push_back("node \"" + node_id + "\": autoDetect grid count must be 1-" +
+                             std::to_string(128 - ntp::kSliceBaseNote) + ", got \"" +
+                             map.auto_detect + "\"");
+        } else if (!known) {
             errors.push_back("node \"" + node_id +
-                             "\": autoDetect \"markers\" (WAV cue chunks) is not in native v1 — "
-                             "author explicit slices[]");
-        } else {
-            const std::optional<int> count = grid_slice_count(map.auto_detect);
-            if (!count.has_value() || *count < 1 || ntp::kSliceBaseNote + *count - 1 > 127) {
-                errors.push_back("node \"" + node_id +
-                                 "\": autoDetect must be \"grid:N\" "
-                                 "(N 1-92), got \"" +
-                                 map.auto_detect + "\"");
-            }
+                             "\": autoDetect must be \"transients\", \"markers\", or "
+                             "\"grid:N\" (N 1-92), got \"" +
+                             map.auto_detect + "\"");
         }
     } else if (map.slices.empty()) {
         errors.push_back("node \"" + node_id + "\": sliceMap needs slices[] or autoDetect");
@@ -891,6 +892,80 @@ std::vector<std::string> native_stage_tags_present(const ArchiveFiles& files,
     return tags;
 }
 
+// ── Slice-map auto-detect helpers ────────────────────────────────────
+
+// A slice boundary this close to another (or to the sample ends) is
+// dropped: a zero-width slice can never sound, and a note-per-slice map
+// should not spend a note on one.
+constexpr double kMinSliceSeconds = 0.002;
+
+std::uint32_t read_le32(const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8U) |
+           (static_cast<std::uint32_t>(p[2]) << 16U) | (static_cast<std::uint32_t>(p[3]) << 24U);
+}
+
+// Sample-frame offsets from a WAV 'cue ' chunk, sorted and unique.
+// Returns false when the bytes are not a RIFF/WAVE container at all; a
+// true return with an empty vector means a valid WAV that carries no
+// cue points. Cue points are 24-byte records after a u32 count; the
+// wanted field is dwSampleOffset (last u32) — the play-order sample
+// index, which for a single-data-chunk PCM WAV is the frame offset.
+bool read_wav_cue_offsets(const std::uint8_t* data, std::size_t size,
+                          std::vector<std::uint32_t>& offsets) {
+    offsets.clear();
+    if (data == nullptr || size < 12 || std::memcmp(data, "RIFF", 4) != 0 ||
+        std::memcmp(data + 8, "WAVE", 4) != 0) {
+        return false;
+    }
+    std::size_t pos = 12;
+    while (pos + 8 <= size) {
+        const std::uint8_t* id = data + pos;
+        const std::uint32_t chunk_size = read_le32(data + pos + 4);
+        const std::size_t body = pos + 8;
+        const std::size_t avail = std::min<std::size_t>(chunk_size, size - body);
+        if (std::memcmp(id, "cue ", 4) == 0 && avail >= 4) {
+            const std::uint32_t count = read_le32(data + body);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const std::size_t rec = body + 4 + (static_cast<std::size_t>(i) * 24);
+                if (rec + 24 > body + avail) {
+                    break;
+                }
+                offsets.push_back(read_le32(data + rec + 20)); // dwSampleOffset
+            }
+        }
+        pos = body + chunk_size + (chunk_size & 1U); // chunks are word-aligned
+    }
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+    return true;
+}
+
+// Builds slice entries from interior boundary times (seconds, sorted).
+// Slice 0 is forced to start at frame 0 so the sample head is always
+// addressable and no audio is dropped (this resolves the detector's
+// "first onset forced to 0" in favour of forcing, not dropping); each
+// surviving boundary starts the next slice; the last runs to `duration`.
+// Boundaries within kMinSliceSeconds of the previous start or of the end
+// are dropped so no zero-width slice is created.
+std::vector<ntp::SliceEntry> slices_from_boundaries(const std::vector<double>& boundaries,
+                                                    double duration) {
+    std::vector<double> starts{0.0};
+    for (const double b : boundaries) {
+        if (b > starts.back() + kMinSliceSeconds && b < duration - kMinSliceSeconds) {
+            starts.push_back(b);
+        }
+    }
+    std::vector<ntp::SliceEntry> slices;
+    slices.reserve(starts.size());
+    for (std::size_t i = 0; i < starts.size(); ++i) {
+        ntp::SliceEntry slice;
+        slice.start = starts[i];
+        slice.end = (i + 1 < starts.size()) ? starts[i + 1] : duration;
+        slices.push_back(slice);
+    }
+    return slices;
+}
+
 } // namespace
 
 std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std::size_t size,
@@ -1055,17 +1130,20 @@ std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std:
         }
     }
 
-    // ── Slice-map grid expansion ─────────────────────────────────────
-    // "grid:N" needs the source duration, so it resolves here — after
-    // asset decode — into N equal author-shaped slices. The runtime
-    // then never distinguishes derived from authored slices.
+    // ── Slice-map auto-detect resolution ─────────────────────────────
+    // "grid:N", "transients", and "markers" all need the source, so they
+    // resolve here — after asset decode — into concrete slices. The
+    // runtime reads only map.slices and never distinguishes derived from
+    // authored: grid chops N equal slices; transients runs the onset
+    // detector over the mono-summed decoded buffer; markers reads the
+    // source WAV's cue chunk from the raw archive bytes (cue offsets live
+    // in the container, not the decoded floats).
     for (ntp::DspNode& node : plugin->manifest.graph.nodes) {
         if (node.type != ntp::NodeType::kSampler || !node.slice_map.has_value()) {
             continue;
         }
         ntp::SliceMap& map = *node.slice_map;
-        const std::optional<int> grid = grid_slice_count(map.auto_detect);
-        if (!grid.has_value()) {
+        if (map.auto_detect.empty()) {
             continue; // author-supplied slices (validation caught the rest)
         }
         std::string source_path = map.source;
@@ -1085,18 +1163,86 @@ std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std:
         }
         const auto it = plugin->samples.find(source_path);
         if (it == plugin->samples.end() || it->second->rate == 0) {
-            errors.push_back("node \"" + node.id + "\": sliceMap grid source \"" + map.source +
+            errors.push_back("node \"" + node.id + "\": sliceMap source \"" + map.source +
                              "\" has no decodable audio");
             continue;
         }
-        const double duration =
-            static_cast<double>(it->second->frames) / static_cast<double>(it->second->rate);
-        map.slices.reserve(static_cast<std::size_t>(*grid));
-        for (int i = 0; i < *grid; ++i) {
-            ntp::SliceEntry slice;
-            slice.start = duration * i / *grid;
-            slice.end = duration * (i + 1) / *grid;
-            map.slices.push_back(slice);
+        const audio::SampleBuffer& src = *it->second;
+        const double duration = static_cast<double>(src.frames) / static_cast<double>(src.rate);
+        // Slice index i triggers note kSliceBaseNote + i, so the highest
+        // usable index is 127 - kSliceBaseNote and the map holds at most
+        // (128 - kSliceBaseNote) slices.
+        const int max_slices = 128 - ntp::kSliceBaseNote;
+
+        if (const std::optional<int> grid = grid_slice_count(map.auto_detect); grid.has_value()) {
+            map.slices.reserve(static_cast<std::size_t>(*grid));
+            for (int i = 0; i < *grid; ++i) {
+                ntp::SliceEntry slice;
+                slice.start = duration * i / *grid;
+                slice.end = duration * (i + 1) / *grid;
+                map.slices.push_back(slice);
+            }
+        } else if (map.auto_detect == "transients") {
+            // Mono-sum the device-rate stereo buffer for detection; the
+            // detector caps at max_slices - 1 onsets so the leading
+            // slice 0 plus the detected boundaries stay within the note
+            // ceiling.
+            std::vector<float> mono(src.frames);
+            for (std::uint32_t f = 0; f < src.frames; ++f) {
+                mono[f] = 0.5F * (src.interleaved[(static_cast<std::size_t>(f) * 2)] +
+                                  src.interleaved[(static_cast<std::size_t>(f) * 2) + 1]);
+            }
+            const auto onsets = audio::detect_onsets(mono.data(), mono.size(), src.rate,
+                                                     static_cast<std::uint32_t>(max_slices - 1));
+            std::vector<double> boundaries;
+            boundaries.reserve(onsets.size());
+            for (const std::uint32_t o : onsets) {
+                boundaries.push_back(static_cast<double>(o) / static_cast<double>(src.rate));
+            }
+            map.slices = slices_from_boundaries(boundaries, duration);
+            if (map.slices.size() <= 1) {
+                // Honest fallback: a silent, DC, or untransient source
+                // yields one whole-sample slice and a warning, never a
+                // silent wrong-slicing.
+                plugin->warnings.push_back("node \"" + node.id +
+                                           "\": sliceMap autoDetect \"transients\" "
+                                           "found no transients in \"" +
+                                           map.source + "\" — using the whole sample as one slice");
+            }
+        } else if (map.auto_detect == "markers") {
+            const std::vector<std::uint8_t>* raw = find_asset(files, source_path);
+            std::vector<std::uint32_t> cues;
+            if (raw == nullptr || !read_wav_cue_offsets(raw->data(), raw->size(), cues)) {
+                errors.push_back("node \"" + node.id +
+                                 "\": sliceMap autoDetect \"markers\" needs a WAV source with a "
+                                 "cue chunk — \"" +
+                                 map.source + "\" is not WAV");
+                continue;
+            }
+            if (cues.empty()) {
+                errors.push_back("node \"" + node.id +
+                                 "\": sliceMap autoDetect \"markers\": "
+                                 "WAV \"" +
+                                 map.source + "\" has no cue points");
+                continue;
+            }
+            // Cue offsets are source-rate sample frames; convert with the
+            // pre-resample rate.
+            const std::uint32_t cue_rate = src.source_rate != 0 ? src.source_rate : src.rate;
+            std::vector<double> boundaries;
+            boundaries.reserve(cues.size());
+            for (const std::uint32_t c : cues) {
+                boundaries.push_back(static_cast<double>(c) / static_cast<double>(cue_rate));
+            }
+            map.slices = slices_from_boundaries(boundaries, duration);
+            if (static_cast<int>(map.slices.size()) > max_slices) {
+                errors.push_back("node \"" + node.id +
+                                 "\": sliceMap autoDetect "
+                                 "\"markers\": " +
+                                 std::to_string(map.slices.size()) + " cue slices exceed the " +
+                                 std::to_string(max_slices) + "-slice note ceiling");
+                map.slices.clear();
+            }
         }
     }
 

@@ -25,6 +25,7 @@ add_executable(nt_tests
     fx_chain_test.cpp
     graph_test.cpp
     ntp_test.cpp
+    onset_detect_test.cpp
     ntp_stage_test.cpp
     instance_state_test.cpp
     povr_session_test.cpp
@@ -47,6 +48,7 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/audio/convolution_engine.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/decoders.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/dsp_fft.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/onset_detect.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/effect_midi.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/fx_chain.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/graph_runner.cpp
