@@ -296,3 +296,10 @@ detail as each fix lands.
   animations per sprite control (named frame lists, fps default 10,
   loop flag) with strict collected validation; chain() and tint are
   not ported (no consumer in the web corpus; ntp-convert unchanged).
+- **CRT pass gated off on light themes** (the shader's bright-pass/
+  scanline/vignette constants assume a dark scene): SETTINGS items
+  disable with an explanation on Arctic Light rather than rendering
+  wrong; a light-aware scanline is the recorded polish-sweep
+  candidate. Dark-theme rendering is pixel-identical (interactive
+  alphas and the toward-black scalings became background-relative
+  mixes that reduce to the old values on near-black palettes).

@@ -318,7 +318,10 @@ void CableOverlay::draw(app::ProjectSession& session, const std::vector<JackAnch
         const float mid_len = polyline_length(scratch_points_) * 0.5F;
         const ImVec2 mid = point_at_length(scratch_points_, mid_len);
         constexpr float kChipRadius = 8.0F;
-        draw->AddCircleFilled(mid, kChipRadius, IM_COL32(20, 14, 8, 230));
+        // Theme-derived chip base (was a hard-coded near-black): keeps
+        // the cable-coloured ring and letter readable on light themes.
+        draw->AddCircleFilled(mid, kChipRadius,
+                              ImGui::GetColorU32(ImGuiCol_WindowBg, 230.0F / 255.0F));
         draw->AddCircle(mid, kChipRadius, style.colour, 0, 1.5F);
         const bool reroute = cable.mode == graph::CableMode::kReroute;
         const char* letter = reroute ? "R" : "T";

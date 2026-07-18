@@ -36,8 +36,12 @@ ImGuiHost::ImGuiHost(AppWindow& window, std::filesystem::path ui_font)
         throw std::runtime_error("ImGui OpenGL3 backend init failed");
     }
 
-    font_scale_ = window_.content_scale();
-    build_fonts(font_scale_);
+    // Dynamically sized font (0 = glyphs baked per requested size by the
+    // RendererHasTextures backend); the live size is driven through the
+    // style's font-scale fields (apply_font_scale), never a rebuild.
+    if (io.Fonts->AddFontFromFileTTF(ui_font_.string().c_str(), 0.0F) == nullptr) {
+        throw std::runtime_error("failed to load UI font: " + ui_font_.string());
+    }
 }
 
 ImGuiHost::~ImGuiHost() {
@@ -46,27 +50,14 @@ ImGuiHost::~ImGuiHost() {
     ImGui::DestroyContext();
 }
 
-void ImGuiHost::build_fonts(float scale) {
-    ImGuiIO& io = ImGui::GetIO();
-    io.Fonts->Clear();
-
-    ImFont* font = io.Fonts->AddFontFromFileTTF(ui_font_.string().c_str(), kFontSizePx * scale);
-    if (font == nullptr) {
-        throw std::runtime_error("failed to load UI font: " + ui_font_.string());
-    }
+void ImGuiHost::apply_font_scale(float content_scale, float user_scale) {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.FontSizeBase = kFontSizePx;
+    style.FontScaleDpi = content_scale;
+    style.FontScaleMain = user_scale;
 }
 
 void ImGuiHost::begin_frame() {
-    // Content scale changes when the window moves between monitors with
-    // different DPI; the atlas must be rebuilt outside a frame.
-    const float scale = window_.content_scale();
-    if (scale != font_scale_) {
-        font_scale_ = scale;
-        build_fonts(scale);
-        ImGui_ImplOpenGL3_DestroyDeviceObjects();
-        ImGui_ImplOpenGL3_CreateDeviceObjects();
-    }
-
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();

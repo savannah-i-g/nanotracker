@@ -13,7 +13,13 @@ struct Settings {
     // Bumped only on incompatible layout changes; additions are free.
     int schema = 1;
 
-    std::string theme_id = "amber";
+    // Fresh-config default; files that saved a theme keep it —
+    // save_settings always writes theme_id.
+    std::string theme_id = "arctic-light";
+
+    // User UI scale, multiplies font size and style metrics; clamped
+    // 0.6–2.0.
+    float ui_scale = 1.0F;
 
     bool crt_enabled = true;
     float crt_intensity = 0.35F; // 0 = off visually, 1 = full effect

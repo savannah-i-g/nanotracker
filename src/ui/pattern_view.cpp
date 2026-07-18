@@ -550,7 +550,10 @@ void PatternView::draw_grid(app::ProjectSession& session, const audio::EngineSna
                 const float x0 = cx + (kFieldLeft[static_cast<std::size_t>(f0)] * m.char_w);
                 const float x1 = std::min(
                     cx + (kFieldRight[static_cast<std::size_t>(f1)] * m.char_w), cx + m.col_w - 2);
-                draw->AddRectFilled({x0, ry}, {x1, ry + m.row_h}, col(theme.primary_glow));
+                // Selection fill from the highlight colour (dark themes:
+                // highlight_bg == primary, so identical to the old glow;
+                // arctic's 0.08 glow would leave the block invisible).
+                draw->AddRectFilled({x0, ry}, {x1, ry + m.row_h}, col(theme.highlight_bg, 0.35F));
             }
 
             const bool is_cursor_cell = row == cursor_.row && ch == cursor_.channel;

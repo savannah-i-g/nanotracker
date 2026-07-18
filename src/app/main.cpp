@@ -273,6 +273,7 @@ struct WindowVisibility {
     bool sample_browser = true;
     bool midi = true;
     bool local_api = true;
+    bool debug = false; // diagnostics surface, off by default
 };
 
 // The dock layout's top strip. Theme/CRT moved to the SETTINGS menu and
@@ -280,9 +281,6 @@ struct WindowVisibility {
 // transport bar: transport controls, engine status, peak meters.
 void draw_shell_window(nt::audio::AudioEngine& audio, nt::app::ProjectSession& session,
                        nt::app::Autosave& autosave) {
-    static bool tone_on = false;
-    static float tone_freq = 440.0F;
-
     ImGui::SetNextWindowSize(ImVec2(430, 140), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("nanoTracker shell")) {
         const nt::audio::EngineSnapshot& snap = audio.snapshot();
@@ -315,25 +313,7 @@ void draw_shell_window(nt::audio::AudioEngine& audio, nt::app::ProjectSession& s
         if (!audio.running()) {
             ImGui::TextWrapped("audio device failed: %s", audio.device().error());
         } else {
-            ImGui::TextDisabled("%s @ %u Hz, %llu pulls, %llu dropped cmds",
-                                audio.device().backend_name(), snap.sample_rate,
-                                static_cast<unsigned long long>(snap.pulls),
-                                static_cast<unsigned long long>(audio.dropped_commands()));
-            ImGui::SameLine();
-            if (ImGui::Checkbox("test tone", &tone_on)) {
-                audio.send({.type = tone_on ? nt::audio::Command::Type::kToneOn
-                                            : nt::audio::Command::Type::kToneOff,
-                            .value = 0.0F,
-                            .sample = nullptr});
-            }
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(160.0F);
-            if (ImGui::SliderFloat("Hz", &tone_freq, 55.0F, 3520.0F, "%.0f",
-                                   ImGuiSliderFlags_Logarithmic)) {
-                audio.send({.type = nt::audio::Command::Type::kToneFreq,
-                            .value = tone_freq,
-                            .sample = nullptr});
-            }
+            ImGui::TextDisabled("%s @ %u Hz", audio.device().backend_name(), snap.sample_rate);
 
             // Ballistic peak meters: instant attack, exponential release
             // (~2 s to the floor) — transients register at full height
@@ -356,6 +336,44 @@ void draw_shell_window(nt::audio::AudioEngine& audio, nt::app::ProjectSession& s
                 }
             }
         }
+    }
+    ImGui::End();
+}
+
+// Diagnostics surface (VIEW → DEBUG, off by default): the engine
+// counters and the test-tone generator that used to crowd the transport
+// shell. Floating — never docked into the default layout.
+void draw_debug_window(nt::audio::AudioEngine& audio, bool& open) {
+    if (!open) {
+        return;
+    }
+    static bool tone_on = false;
+    static float tone_freq = 440.0F;
+
+    ImGui::SetNextWindowSize(ImVec2(430, 120), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("DEBUG", &open)) {
+        const nt::audio::EngineSnapshot& snap = audio.snapshot();
+        ImGui::TextDisabled("%s @ %u Hz, %llu pulls, %llu dropped cmds",
+                            audio.device().backend_name(), snap.sample_rate,
+                            static_cast<unsigned long long>(snap.pulls),
+                            static_cast<unsigned long long>(audio.dropped_commands()));
+
+        ImGui::BeginDisabled(!audio.running());
+        if (ImGui::Checkbox("test tone", &tone_on)) {
+            audio.send({.type = tone_on ? nt::audio::Command::Type::kToneOn
+                                        : nt::audio::Command::Type::kToneOff,
+                        .value = 0.0F,
+                        .sample = nullptr});
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::SliderFloat("Hz", &tone_freq, 55.0F, 3520.0F, "%.0f",
+                               ImGuiSliderFlags_Logarithmic)) {
+            audio.send({.type = nt::audio::Command::Type::kToneFreq,
+                        .value = tone_freq,
+                        .sample = nullptr});
+        }
+        ImGui::EndDisabled();
     }
     ImGui::End();
 }
@@ -459,6 +477,7 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
             ImGui::MenuItem("midi", nullptr, &vis.midi);
             ImGui::MenuItem("LOCAL API", nullptr, &vis.local_api);
             ImGui::MenuItem("EXPORT", nullptr, &shell.show_export);
+            ImGui::MenuItem("DEBUG", nullptr, &vis.debug);
             ImGui::Separator();
             if (ImGui::MenuItem("reset layout")) {
                 reset_layout = true;
@@ -476,11 +495,30 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("UI scale")) {
+                // Edits the persisted factor only; the frame-loop poll
+                // applies it live (metrics + font).
+                ImGui::SetNextItemWidth(160.0F);
+                ImGui::SliderFloat("##ui_scale", &settings.ui_scale, 0.6F, 2.0F, "%.2fx",
+                                   ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::MenuItem("reset to 1.00x")) {
+                    settings.ui_scale = 1.0F;
+                }
+                ImGui::EndMenu();
+            }
+            // The CRT shader's bloom/scanline/vignette constants assume a
+            // dark scene, so the pass is gated off on light themes
+            // (crt.end) and its controls disabled here.
+            ImGui::BeginDisabled(active->light);
             ImGui::MenuItem("CRT effect", nullptr, &settings.crt_enabled);
             ImGui::BeginDisabled(!settings.crt_enabled);
             ImGui::SetNextItemWidth(140.0F);
             ImGui::SliderFloat("intensity", &settings.crt_intensity, 0.0F, 1.0F, "%.2f");
             ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            if (active->light) {
+                ImGui::TextDisabled("CRT unavailable on light themes");
+            }
             ImGui::Separator();
             if (audio.running()) {
                 ImGui::TextDisabled("%s @ %u Hz", audio.device().backend_name(),
@@ -897,8 +935,21 @@ int main(int argc, char** argv) {
         }
 
         long frame_count = 0;
+        // The one styling entry point, run outside any frame: reset the
+        // style metrics, restore the palette colors, set the font-scale
+        // fields — in that order. 0 forces the first-frame build; the
+        // triple reruns live on UI-scale edits and monitor-DPI changes.
+        float applied_scale = 0.0F;
         while (!window.should_close() && !script.quit_requested() &&
                (cli.frame_limit == 0 || frame_count++ < cli.frame_limit)) {
+            const float total_scale = window.content_scale() * settings.ui_scale;
+            if (total_scale != applied_scale) {
+                applied_scale = total_scale;
+                nt::ui::apply_style_metrics(total_scale);
+                nt::ui::apply_theme(*theme);
+                nt::platform::ImGuiHost::apply_font_scale(window.content_scale(),
+                                                          settings.ui_scale);
+            }
             window.begin_frame(theme->background.x, theme->background.y, theme->background.z);
             if (script.active()) {
                 script.update(); // queue scripted events before NewFrame
@@ -909,7 +960,7 @@ int main(int argc, char** argv) {
             window.framebuffer_size(fb_w, fb_h);
             crt.begin(fb_w, fb_h, theme->background.x, theme->background.y, theme->background.z);
 
-            imgui.begin_frame();
+            nt::platform::ImGuiHost::begin_frame();
             // Menu first (it can arm a dock rebuild), then the rebuild,
             // then the dockspace submits and picks the nodes up.
             theme = draw_main_menu_bar(theme, settings, audio, session, window, shell, vis,
@@ -941,6 +992,9 @@ int main(int argc, char** argv) {
             }
             draw_help_window(shell);
             draw_licence_window(shell);
+            if (vis.debug) {
+                draw_debug_window(audio, vis.debug);
+            }
             autosave.update(session, std::chrono::duration<double>(
                                          std::chrono::steady_clock::now().time_since_epoch())
                                          .count());
@@ -999,7 +1053,7 @@ int main(int argc, char** argv) {
             session.sweep_retired();
             nt::platform::ImGuiHost::end_frame();
 
-            crt.end(settings.crt_enabled, settings.crt_intensity);
+            crt.end(settings.crt_enabled && !theme->light, settings.crt_intensity);
             if (std::string shot_path; script.take_screenshot(shot_path)) {
                 write_framebuffer_ppm(shot_path.c_str(), fb_w, fb_h);
             }

@@ -1,7 +1,8 @@
 // platform/imgui_context — Dear ImGui lifetime and per-frame plumbing.
 // Owns backend init/teardown, docking configuration, layout persistence
-// (io.IniFilename → config_dir()/layout.ini) and the Kode Mono font
-// atlas including DPI-aware rebuilds.
+// (io.IniFilename → config_dir()/layout.ini) and the Kode Mono font.
+// The font is loaded dynamically sized (ImGui 1.92 bakes glyphs per
+// requested size), so scale changes never rebuild the atlas.
 #pragma once
 
 #include <filesystem>
@@ -13,9 +14,10 @@ class AppWindow;
 
 class ImGuiHost {
 public:
-    // `ui_font` is the regular-weight TTF used at kFontSizePx (scaled
-    // by monitor content scale). Throws std::runtime_error on backend
-    // or font failure.
+    // `ui_font` is the regular-weight TTF, loaded dynamically sized; the
+    // live size is kFontSizePx driven through the style's font-scale
+    // fields (apply_font_scale). Throws std::runtime_error on backend or
+    // font failure.
     ImGuiHost(AppWindow& window, std::filesystem::path ui_font);
     ~ImGuiHost();
 
@@ -24,9 +26,9 @@ public:
     ImGuiHost(ImGuiHost&&) = delete;
     ImGuiHost& operator=(ImGuiHost&&) = delete;
 
-    // Starts an ImGui frame. Detects content-scale changes and rebuilds
-    // the font atlas before the frame begins (never mid-frame).
-    void begin_frame();
+    // Starts an ImGui frame. Static like end_frame: both operate on the
+    // single global ImGui context, not per-instance state.
+    static void begin_frame();
 
     // Finalises the frame and issues the backend draw calls into
     // whatever framebuffer is currently bound.
@@ -45,17 +47,22 @@ public:
     // that case; otherwise ImGui restores the saved one.
     [[nodiscard]] bool layout_file_existed() const { return layout_file_existed_; }
 
-    static constexpr float kFontSizePx = 16.0F;
+    // The 1.92 dynamic-font path: sets the style's font-scale fields (no
+    // atlas rebuild). Must run after apply_style_metrics (which resets
+    // them) and only outside NewFrame..Render.
+    static void apply_font_scale(float content_scale, float user_scale);
+
+    // Base UI font size in points; the owner asked the default down
+    // (~15%) from the original 16 px. The live size is this times the
+    // style's font-scale fields.
+    static constexpr float kFontSizePx = 14.0F;
 
 private:
-    void build_fonts(float scale);
-
     AppWindow& window_;
     std::filesystem::path ui_font_;
     // io.IniFilename aliases this string for the context's lifetime.
     std::string layout_ini_path_;
     bool layout_file_existed_ = false;
-    float font_scale_ = 1.0F;
 };
 
 } // namespace nt::platform

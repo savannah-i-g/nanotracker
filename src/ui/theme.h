@@ -25,14 +25,21 @@ struct Theme {
     ImVec4 text;
     ImVec4 text_dim;
     ImVec4 border;
+
+    // highlight pair = the web theme's selection colours; light flags
+    // palettes with bright backgrounds — CRT and state-alpha handling
+    // branch on it.
+    ImVec4 highlight_bg;
+    ImVec4 highlight_text;
+    bool light = false;
 };
 
 // The web pattern editor's per-channel hue palette
 // (FX_CHANNEL_COLORS / PATTERN_CHANNEL_COLORS, 32 entries).
 ImU32 channel_color(int channel_index);
 
-// The built-in palettes, in display order. Index 0 (amber) is the
-// default.
+// The built-in palettes, in display order. Index 0 (arctic-light) is
+// the default.
 std::span<const Theme> themes();
 
 // Theme lookup by settings id; falls back to the default theme when the
@@ -42,5 +49,12 @@ const Theme& theme_by_id(std::string_view id);
 // Applies the palette to the global ImGui style. Call at startup and on
 // theme switch; safe between frames.
 void apply_theme(const Theme& theme);
+
+// Builds the app's density baseline on a FRESH default ImGuiStyle, then
+// ScaleAllSizes(scale) — never rescales the live style (ScaleAllSizes
+// truncates; cumulative calls drift). Resets colors and font-scale
+// fields as a side effect: caller must follow with apply_theme and
+// ImGuiHost::apply_font_scale.
+void apply_style_metrics(float scale);
 
 } // namespace nt::ui

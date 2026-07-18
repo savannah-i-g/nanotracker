@@ -3,6 +3,34 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 22 closed — Arctic Light default, UI scale, shell cleanup
+
+- Landed: **ARCTIC LIGHT** (the owner's original web palette,
+  verbatim values) added first in the theme table and made the
+  fresh-config default (saved choices untouched); `Theme` grew
+  highlight pair + light flag, per-theme glow alpha; `apply_theme`'s
+  toward-black scalings became background-relative mixes (dark
+  themes pixel-identical), light-specific interactive alphas, and 13
+  previously-unset ImGui 1.92 color slots pinned (default white
+  InputTextCursor was invisible on #ecf4f8). CRT hard-gated off on
+  light themes with explained-disabled menu items (FIXES.md).
+  **UI scale**: persisted `ui_scale` (0.6-2.0) through ImGui 1.92's
+  dynamic font system (FontSizeBase 14 — down from 16 per owner —
+  FontScaleMain = setting, FontScaleDpi = monitor), live from a
+  SETTINGS slider, metrics+theme+font re-derived on any change on a
+  FRESH default style (never cumulative); density pass centralised
+  in `apply_style_metrics`. **DEBUG window** (VIEW-gated, hidden by
+  default) took the test tone and engine counters; the shell is now
+  a clean transport bar. Dark-assumption fixes in pattern/piano/
+  cable views. README hero recaptured in the new default.
+- Verification: 131/131 both trees (independently re-run); tidy
+  clean; fresh-config screenshot = genuine light UI with readable
+  grid and CRT auto-off; AMBER live-switch pixel-faithful; 1.5×
+  scale reflows cleanly. Known cosmetics recorded for the polish
+  sweep (shell right-align at high scale, light-aware CRT, bright
+  identity hues on light).
+- Backup: `NanoTracker_stage22_2026-07-18.tar.gz`; git tag `stage-22`.
+
 ## 2026-07-18 — Stage 21 closed — native_stage C-ABI + 1.0.0 release; post-v1 cycle complete
 
 - Landed: **the frozen native_stage ABI v1**

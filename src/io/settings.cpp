@@ -46,6 +46,7 @@ Settings load_settings(const std::filesystem::path& path) {
 
     read_if(j, "schema", settings.schema);
     read_if(j, "theme_id", settings.theme_id);
+    read_if(j, "ui_scale", settings.ui_scale);
     read_if(j, "crt_enabled", settings.crt_enabled);
     read_if(j, "crt_intensity", settings.crt_intensity);
     read_if(j, "window_width", settings.window_width);
@@ -62,6 +63,7 @@ Settings load_settings(const std::filesystem::path& path) {
 
     // Defensive clamps mirroring the web loader (cableSettings.ts:78-83)
     // so corrupted storage can never explode the rope simulator.
+    settings.ui_scale = std::clamp(settings.ui_scale, 0.6F, 2.0F);
     settings.cable_resolution = std::clamp(settings.cable_resolution, 1, 64);
     settings.cable_gravity = std::max(0.0F, settings.cable_gravity);
     settings.cable_damping = std::clamp(settings.cable_damping, 0.0F, 0.95F);
@@ -76,6 +78,7 @@ bool save_settings(const Settings& settings, const std::filesystem::path& path) 
     const json j = {
         {"schema", settings.schema},
         {"theme_id", settings.theme_id},
+        {"ui_scale", settings.ui_scale},
         {"crt_enabled", settings.crt_enabled},
         {"crt_intensity", settings.crt_intensity},
         {"window_width", settings.window_width},

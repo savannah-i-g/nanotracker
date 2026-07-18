@@ -382,7 +382,12 @@ void PianoRollView::draw(app::ProjectSession& session, const Theme& theme) {
                        origin.y + std::min(drag_press_.y, local.y)};
         const ImVec2 b{origin.x + std::max(drag_press_.x, local.x),
                        origin.y + std::max(drag_press_.y, local.y)};
-        draw->AddRectFilled(a, b, ImGui::GetColorU32(theme.primary_glow));
+        // Rubber-band fill from the highlight colour (dark themes:
+        // highlight_bg == primary, matching the old glow; arctic's 0.08
+        // glow would leave the marquee invisible).
+        ImVec4 fill = theme.highlight_bg;
+        fill.w = 0.35F;
+        draw->AddRectFilled(a, b, ImGui::GetColorU32(fill));
         draw->AddRect(a, b, ImGui::GetColorU32(theme.primary));
     }
 
