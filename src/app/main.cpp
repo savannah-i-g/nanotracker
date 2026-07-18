@@ -496,13 +496,24 @@ const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Set
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("UI scale")) {
-                // Edits the persisted factor only; the frame-loop poll
-                // applies it live (metrics + font).
+                // The drag edits a staged copy; the persisted factor
+                // (which the frame-loop poll applies to metrics + font)
+                // commits on RELEASE. Applying mid-drag rescales the
+                // slider under the cursor and the remapped grab runs
+                // away to the bound.
+                static float staged_scale = settings.ui_scale;
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    staged_scale = settings.ui_scale; // follow external changes
+                }
                 ImGui::SetNextItemWidth(160.0F);
-                ImGui::SliderFloat("##ui_scale", &settings.ui_scale, 0.6F, 2.0F, "%.2fx",
+                ImGui::SliderFloat("##ui_scale", &staged_scale, 0.6F, 2.0F, "%.2fx",
                                    ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    settings.ui_scale = staged_scale;
+                }
                 if (ImGui::MenuItem("reset to 1.00x")) {
                     settings.ui_scale = 1.0F;
+                    staged_scale = 1.0F;
                 }
                 ImGui::EndMenu();
             }
