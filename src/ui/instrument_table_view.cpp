@@ -9,8 +9,60 @@
 
 namespace nt::ui {
 
+namespace {
+
+constexpr std::array<const char*, 3> kSourceTypeNames = {"sample", "plugin", "workspace"};
+
+// Combo over the NTP catalogue; returns true when the entry changed.
+bool plugin_source_combo(app::ProjectSession& session, engine::InstrumentTableEntry& entry) {
+    const auto& catalogue = session.plugin_registry().all();
+    const char* current = entry.plugin_id.empty() ? "(none)" : entry.plugin_id.c_str();
+    bool changed = false;
+    ImGui::SetNextItemWidth(-1.0F);
+    if (ImGui::BeginCombo("##plug", current)) {
+        for (const auto& plugin : catalogue) {
+            const std::string& id = plugin->manifest.id;
+            const bool selected = id == entry.plugin_id;
+            if (ImGui::Selectable(plugin->manifest.name.c_str(), selected)) {
+                entry.plugin_id = id;
+                entry.workspace_id.clear();
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+// Combo over live plugin workspace nodes (NTP/CLAP/VST3 instances all
+// bind through the same workspace-id path).
+bool workspace_source_combo(app::ProjectSession& session, engine::InstrumentTableEntry& entry) {
+    const char* current = entry.workspace_id.empty() ? "(none)" : entry.workspace_id.c_str();
+    bool changed = false;
+    ImGui::SetNextItemWidth(-1.0F);
+    if (ImGui::BeginCombo("##wsp", current)) {
+        for (const graph::Node& node : session.workspace().nodes()) {
+            if (node.kind != graph::NodeKind::kPlugin) {
+                continue;
+            }
+            const bool selected = node.workspace_id == entry.workspace_id;
+            std::array<char, 96> label{};
+            std::snprintf(label.data(), label.size(), "%s (%s)", node.display_name.c_str(),
+                          node.workspace_id.c_str());
+            if (ImGui::Selectable(label.data(), selected)) {
+                entry.workspace_id = node.workspace_id;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+} // namespace
+
 void InstrumentTableView::draw(app::ProjectSession& session, const Theme& theme) {
-    ImGui::SetNextWindowSize(ImVec2(520, 380), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(620, 380), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("INSTRUMENTS")) {
         engine::TrackerProject& project = session.project();
         const int channels = project.channels;
@@ -19,9 +71,10 @@ void InstrumentTableView::draw(app::ProjectSession& session, const Theme& theme)
                            "slot → source; ▣ = bound tracks (instrument-free note entry)");
         ImGui::Separator();
 
-        if (ImGui::BeginTable("instr", 3, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg)) {
+        if (ImGui::BeginTable("instr", 4, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg)) {
             ImGui::TableSetupColumn("slot", ImGuiTableColumnFlags_WidthFixed, 44.0F);
-            ImGui::TableSetupColumn("sample", ImGuiTableColumnFlags_WidthFixed, 90.0F);
+            ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthFixed, 96.0F);
+            ImGui::TableSetupColumn("source", ImGuiTableColumnFlags_WidthFixed, 170.0F);
             ImGui::TableSetupColumn("bound tracks");
             ImGui::TableHeadersRow();
 
@@ -41,14 +94,38 @@ void InstrumentTableView::draw(app::ProjectSession& session, const Theme& theme)
                 ImGui::TextColored(theme.primary, "%02X", slot);
 
                 ImGui::TableSetColumnIndex(1);
-                int sample_id = entry.sample_id;
+                int type_index = static_cast<int>(entry.type);
                 ImGui::SetNextItemWidth(-1.0F);
-                if (ImGui::InputInt("##smp", &sample_id, 0)) {
-                    entry.sample_id = std::clamp(sample_id, 0, engine::kMaxSamples);
+                if (ImGui::Combo("##type", &type_index, kSourceTypeNames.data(),
+                                 static_cast<int>(kSourceTypeNames.size()))) {
+                    entry.type = static_cast<engine::InstrumentSourceType>(type_index);
                     session.set_instrument_entry(slot, entry);
                 }
 
                 ImGui::TableSetColumnIndex(2);
+                switch (entry.type) {
+                case engine::InstrumentSourceType::kSample: {
+                    int sample_id = entry.sample_id;
+                    ImGui::SetNextItemWidth(-1.0F);
+                    if (ImGui::InputInt("##smp", &sample_id, 0)) {
+                        entry.sample_id = std::clamp(sample_id, 0, engine::kMaxSamples);
+                        session.set_instrument_entry(slot, entry);
+                    }
+                    break;
+                }
+                case engine::InstrumentSourceType::kPlugin:
+                    if (plugin_source_combo(session, entry)) {
+                        session.set_instrument_entry(slot, entry);
+                    }
+                    break;
+                case engine::InstrumentSourceType::kWorkspace:
+                    if (workspace_source_combo(session, entry)) {
+                        session.set_instrument_entry(slot, entry);
+                    }
+                    break;
+                }
+
+                ImGui::TableSetColumnIndex(3);
                 bool bound_changed = false;
                 for (int ch = 0; ch < channels; ++ch) {
                     const bool bound =

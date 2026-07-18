@@ -1,16 +1,65 @@
 #include "app/undo.h"
 
+#include <memory>
+#include <ranges>
 #include <utility>
 
 namespace nt::app {
 
 void UndoStack::push(std::string label, std::function<void()> undo, std::function<void()> redo) {
-    undo_stack_.push_back({std::move(label), std::move(undo), std::move(redo)});
-    if (undo_stack_.size() > kMaxEntries) {
-        undo_stack_.pop_front();
+    Entry entry{std::move(label), std::move(undo), std::move(redo)};
+    if (group_depth_ > 0) {
+        group_entries_.push_back(std::move(entry));
+        // Group members are new edits too: the redo branch dies now,
+        // not at commit time.
+        redo_stack_.clear();
+        return;
     }
-    // A new edit invalidates the redo branch.
-    redo_stack_.clear();
+    commit(std::move(entry));
+}
+
+void UndoStack::begin_group(std::string label) {
+    if (group_depth_ == 0) {
+        group_label_ = std::move(label);
+    }
+    ++group_depth_;
+}
+
+void UndoStack::end_group() {
+    if (group_depth_ == 0) {
+        return;
+    }
+    --group_depth_;
+    if (group_depth_ > 0) {
+        return;
+    }
+    if (group_entries_.empty()) {
+        return;
+    }
+    if (group_entries_.size() == 1) {
+        // Single member: keep it flat, relabelled for the group.
+        Entry only = std::move(group_entries_.front());
+        group_entries_.clear();
+        only.label = std::move(group_label_);
+        commit(std::move(only));
+        return;
+    }
+    // Composite entry: undo unwinds members in reverse push order,
+    // redo replays them forward. Shared ownership lets both closures
+    // reference one member list.
+    auto members = std::make_shared<std::vector<Entry>>(std::move(group_entries_));
+    group_entries_.clear();
+    commit({std::move(group_label_),
+            [members] {
+                for (const Entry& member : std::views::reverse(*members)) {
+                    member.undo();
+                }
+            },
+            [members] {
+                for (const Entry& member : *members) {
+                    member.redo();
+                }
+            }});
 }
 
 bool UndoStack::undo() {
@@ -45,6 +94,17 @@ const char* UndoStack::next_redo_label() const {
 
 void UndoStack::clear() {
     undo_stack_.clear();
+    redo_stack_.clear();
+    group_entries_.clear();
+    group_depth_ = 0;
+}
+
+void UndoStack::commit(Entry entry) {
+    undo_stack_.push_back(std::move(entry));
+    if (undo_stack_.size() > kMaxEntries) {
+        undo_stack_.pop_front();
+    }
+    // A new edit invalidates the redo branch.
     redo_stack_.clear();
 }
 

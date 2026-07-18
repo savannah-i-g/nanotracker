@@ -261,6 +261,7 @@ add_executable(nanotracker
     ${NT_EDITOR_SURFACE_SOURCE}
     src/app/main.cpp
     src/app/input_script.cpp
+    src/app/pattern_ops.cpp
     src/app/project_session.cpp
     src/app/autosave.cpp
     src/app/undo.cpp
@@ -279,6 +280,7 @@ add_executable(nanotracker
     src/audio/fx_chain.cpp
     src/audio/graph_runner.cpp
     src/audio/sample_buffer.cpp
+    src/engine/sequence_ops.cpp
     src/engine/tracker_engine.cpp
     src/ext/clap_host.cpp
     src/ext/editor_window.cpp

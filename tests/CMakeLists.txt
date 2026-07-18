@@ -16,6 +16,8 @@ add_executable(nt_tests
     s3m_import_test.cpp
     it_import_test.cpp
     session_test.cpp
+    pattern_ops_test.cpp
+    sequence_ops_test.cpp
     fx_chain_test.cpp
     graph_test.cpp
     ntp_test.cpp
@@ -23,6 +25,7 @@ add_executable(nt_tests
     midi_test.cpp
     ftrk_writer_test.cpp
     export_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/pattern_ops.cpp
     ${CMAKE_SOURCE_DIR}/src/app/project_session.cpp
     ${CMAKE_SOURCE_DIR}/src/app/undo.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/audio_device_openal.cpp
@@ -46,6 +49,7 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/midi/midi_io.cpp
     ${CMAKE_SOURCE_DIR}/src/midi/midi_out_thread.cpp
     ${CMAKE_SOURCE_DIR}/src/modplay/module_player.cpp
+    ${CMAKE_SOURCE_DIR}/src/engine/sequence_ops.cpp
     ${CMAKE_SOURCE_DIR}/src/engine/tracker_engine.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/clap_host.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/editor_window.cpp

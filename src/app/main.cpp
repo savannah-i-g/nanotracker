@@ -27,6 +27,7 @@
 #include "ui/theme.h"
 #include "ui/workspace_view.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -286,10 +287,16 @@ void draw_audio_section(nt::audio::AudioEngine& audio, SampleRegistry& samples) 
                             snap.speed);
     }
 
-    // Block-peak meters: raw snapshot peaks, decaying visually via
-    // ImGui's own frame pacing rather than a ballistic envelope.
-    ImGui::ProgressBar(snap.peak_l, ImVec2(-1.0F, 4.0F), "");
-    ImGui::ProgressBar(snap.peak_r, ImVec2(-1.0F, 4.0F), "");
+    // Ballistic peak meters: instant attack, exponential release
+    // (~2 s to the floor) — transients register at full height and
+    // the fall reads at any frame rate.
+    static float meter_l = 0.0F;
+    static float meter_r = 0.0F;
+    const float release = std::exp(-ImGui::GetIO().DeltaTime * 3.0F);
+    meter_l = std::max(snap.peak_l, meter_l * release);
+    meter_r = std::max(snap.peak_r, meter_r * release);
+    ImGui::ProgressBar(meter_l, ImVec2(-1.0F, 4.0F), "");
+    ImGui::ProgressBar(meter_r, ImVec2(-1.0F, 4.0F), "");
 }
 
 struct ShellState {
