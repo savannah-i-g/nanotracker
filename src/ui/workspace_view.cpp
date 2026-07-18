@@ -340,14 +340,13 @@ bool WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settin
 void WorkspaceView::draw(app::ProjectSession& session, io::Settings& settings, const Theme& theme) {
     anchors_.clear();
 
-    // The patchbay (node windows + cable overlay) shows only while the
-    // workspace window itself is visible — in the docked layout the
-    // node panels would otherwise float over whichever center tab is
-    // active. Skipping the draw skips geometry write-back too, which
-    // is fine: nothing moves while hidden.
-    if (!draw_control_window(session, settings, theme)) {
-        return;
-    }
+    // The patchbay infrastructure (bus/master/module/sum/ext nodes +
+    // the cable overlay) shows only while the workspace window itself
+    // is visible — in the docked layout those panels would otherwise
+    // float over whichever center tab is active. Plugin instrument
+    // windows are working surfaces, not patchbay furniture: they stay
+    // up regardless of the active tab.
+    const bool patchbay_visible = draw_control_window(session, settings, theme);
 
     // Node windows write geometry back into the model; close requests
     // collect during the loop and dispatch after so the vector stays
@@ -356,6 +355,9 @@ void WorkspaceView::draw(app::ProjectSession& session, io::Settings& settings, c
     const int generation = session.workspace_layout_generation();
     std::string close_requested;
     for (graph::Node& node : nodes) {
+        if (!patchbay_visible && node.kind != graph::NodeKind::kPlugin) {
+            continue;
+        }
         if (draw_node_window(session, node, theme, generation)) {
             close_requested = node.workspace_id;
         }
@@ -365,11 +367,13 @@ void WorkspaceView::draw(app::ProjectSession& session, io::Settings& settings, c
         session.remove_workspace_node(close_requested);
     }
 
-    std::string message;
-    overlay_.draw(session, anchors_, settings, message);
-    if (!message.empty()) {
-        status_ = message;
-        status_ttl_ = 4.0F;
+    if (patchbay_visible) {
+        std::string message;
+        overlay_.draw(session, anchors_, settings, message);
+        if (!message.empty()) {
+            status_ = message;
+            status_ttl_ = 4.0F;
+        }
     }
     status_ttl_ = std::max(0.0F, status_ttl_ - ImGui::GetIO().DeltaTime);
 }
