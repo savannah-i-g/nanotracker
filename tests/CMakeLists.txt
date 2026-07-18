@@ -24,6 +24,7 @@ add_executable(nt_tests
     fx_chain_test.cpp
     graph_test.cpp
     ntp_test.cpp
+    ntp_stage_test.cpp
     povr_session_test.cpp
     clap_host_test.cpp
     vst3_run_loop_test.cpp
@@ -55,6 +56,7 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/plugins/image_decode.cpp
     ${CMAKE_SOURCE_DIR}/src/plugins/ntp_graph.cpp
     ${CMAKE_SOURCE_DIR}/src/plugins/ntp_loader.cpp
+    ${CMAKE_SOURCE_DIR}/src/plugins/ntp_stage_host.cpp
     ${CMAKE_SOURCE_DIR}/src/plugins/plugin_registry.cpp
     ${CMAKE_SOURCE_DIR}/src/plugins/ntp_voices.cpp
     ${CMAKE_SOURCE_DIR}/src/plugins/preset_bank.cpp
@@ -103,6 +105,22 @@ target_compile_options(nt_test_clap PRIVATE
 add_dependencies(nt_tests nt_test_clap)
 target_compile_definitions(nt_tests PRIVATE
     NT_TEST_CLAP="$<TARGET_FILE:nt_test_clap>")
+
+# Real native-stage binaries for the C-ABI host verification (plain
+# C99 against include/ntp/ntp_stage_abi.h — both fixtures must build
+# warning-free on GCC/Clang/MSVC; ntp_stage_test embeds them into
+# in-memory archives under binaries/<platform-tag>/).
+add_library(nt_test_stage_gain MODULE fixtures/test_stage_gain.c)
+add_library(nt_test_stage_wrong_version MODULE fixtures/test_stage_wrong_version.c)
+foreach(stage_fixture nt_test_stage_gain nt_test_stage_wrong_version)
+    target_include_directories(${stage_fixture} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    set_target_properties(${stage_fixture} PROPERTIES
+        PREFIX "" C_VISIBILITY_PRESET hidden)
+endforeach()
+add_dependencies(nt_tests nt_test_stage_gain nt_test_stage_wrong_version)
+target_compile_definitions(nt_tests PRIVATE
+    NT_TEST_STAGE_GAIN="$<TARGET_FILE:nt_test_stage_gain>"
+    NT_TEST_STAGE_WRONG_VERSION="$<TARGET_FILE:nt_test_stage_wrong_version>")
 set_source_files_properties(${CMAKE_SOURCE_DIR}/src/audio/decoders.cpp
     PROPERTIES COMPILE_OPTIONS "${NT_SILENCE_WARNINGS}")
 set_source_files_properties(${CMAKE_SOURCE_DIR}/src/plugins/image_decode.cpp

@@ -1,0 +1,8 @@
+# Staged winget version manifest — submit at Windows GA promotion
+# (see README.md beside this file). Fields marked TODO are filled
+# from the promoting release.
+PackageIdentifier: SavannahGoring.NanoTracker
+PackageVersion: 1.0.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

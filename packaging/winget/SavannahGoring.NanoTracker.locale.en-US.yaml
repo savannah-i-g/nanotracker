@@ -1,0 +1,18 @@
+# Staged winget locale manifest — submit at Windows GA promotion.
+PackageIdentifier: SavannahGoring.NanoTracker
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: Savannah Goring
+PackageName: NanoTracker
+License: GPL-3.0
+LicenseUrl: https://github.com/savannah-i-g/nanotracker/blob/main/LICENSE
+ShortDescription: Native music tracker with a patchable workspace, plugin hosting, MIDI, and module import.
+PackageUrl: https://github.com/savannah-i-g/nanotracker
+Moniker: nanotracker
+Tags:
+  - music
+  - tracker
+  - audio
+  - midi
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

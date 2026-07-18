@@ -13,6 +13,7 @@
 
 #include "audio/sample_buffer.h"
 #include "ntp/ntp_manifest.h"
+#include "plugins/ntp_stage_host.h"
 
 #include <cstdint>
 #include <map>
@@ -46,6 +47,19 @@ struct LoadedNtpPlugin {
     };
 
     std::map<std::string, Image> images;
+
+    // ── Native stages ────────────────────────────────────────────────
+    // Loaded stage binaries keyed by manifest stage name (one entry
+    // even when several nodes share a binary). Library handles stay
+    // open for the plugin's lifetime; the registry retires — never
+    // unloads — replaced plugins, so NodeRuntimes built from a retired
+    // plugin keep valid entry pointers, exactly like CLAP libraries.
+    std::map<std::string, std::unique_ptr<NativeStageBinary>> stages;
+
+    // True when the manifest carries native_stage nodes: unlike
+    // pure-data NTP, this archive executes code. The UI shows the
+    // marker wherever the plugin's identity shows — never silent.
+    bool executes_native_code = false;
 
     std::vector<std::string> warnings;
 };

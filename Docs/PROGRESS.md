@@ -3,6 +3,60 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 21 closed — native_stage C-ABI + 1.0.0 release; post-v1 cycle complete
+
+- Landed: **the frozen native_stage ABI v1**
+  (`include/ntp/ntp_stage_abi.h`, MIT + plugin exception, written for
+  third-party authors): `abi_version` forever the first member and
+  checked before anything else; descriptor + ≤12-param table (host
+  bound, additive to raise); create/destroy/process (non-interleaved
+  stereo, block-rate params clamped to range) + optional
+  all-or-none state chunks + reset; reserved fields throughout;
+  archive layout `binaries/<platform-tag>/` (linux-x86_64 /
+  windows-x86_64, additive tags). Host (`plugins/ntp_stage_host`):
+  temp-extraction + shared-library wrapper, version gate naming both
+  versions on mismatch, missing-platform refusal LISTING the tags
+  present, create/destroy probe at load. Runtime: NodeRuntime
+  trampoline through ParamSlots (mod routes + toParam work),
+  instance-scope enforced, `plugin_reset()` carries ABI reset through
+  the kSetBundle drain. Trust surface: `[native code]` badge +
+  tooltip on catalogue entries and plugin windows — never silent.
+  State chunks are session-live (FTRK has no NTP-instance state
+  block; a future additive block is the recorded path). **DAW shell**
+  (task #33, owner request 2026-07-18): layout persistence to
+  `config_dir()/layout.ini` (v1 had ini disabled — the window-pile
+  root cause), DockBuilder default layout on first run + VIEW→reset
+  (transport strip top, PATTERN-dominant center tabs, samples strip
+  bottom, midi/API/export right rail), main menu bar
+  (FILE/EDIT/VIEW/SETTINGS/HELP) routing through the existing
+  session paths, shell slimmed to a transport bar; the patchbay
+  (node panels + cables) now draws only while the workspace tab is
+  visible. **Release engineering**: README rebuilt to public
+  standard (badges, nav, hero screenshot at Docs/media/, no em
+  dashes) per owner direction; version 1.0.0; AppImage packaging
+  (`tools/package_appimage.sh` + placeholder icon); winget manifests
+  staged under `packaging/winget/` — submission deliberately waits
+  for Windows GA promotion (locked decision 4). **v1.0.0 GitHub
+  release** with the Linux AppImage and the Windows x64 zip
+  (explicitly beta; promotion criteria in the README). Site features
+  page pointer: Savannah's site can now link the releases page.
+- Verification: 131/131 both trees (6 new: strict stage-manifest
+  validation, bit-exact fixture processing under RtScope + param
+  sweep + clamp, audio-rate toParam collapse, state round-trip +
+  reset via the real audio-thread path, wrong-version refusal naming
+  both versions, missing-platform refusal listing present tags; CI
+  builds both fixtures on both runners); layout verified with
+  fresh-config screenshots against the web reference (first-run
+  default, drag + reset restore, menu trees, persisted-tab restart);
+  hero screenshot captured from the shipped first-run; CI green both
+  platforms.
+- Cycle completion: all nine post-v1 stages closed. Windows GA
+  promotion remains community-gated per locked decision 4 — the
+  criteria live in the README; the staged winget manifests submit at
+  promotion.
+- Backup: `NanoTracker_stage21_2026-07-18.tar.gz`; git tags
+  `stage-21` + `v1.0.0`.
+
 ## 2026-07-18 — Stage 20 closed — Plugin platform
 
 - Landed: **one partitioned-FFT convolution engine, two payoffs**

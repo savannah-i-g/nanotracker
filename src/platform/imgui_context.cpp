@@ -1,6 +1,7 @@
 #include "platform/imgui_context.h"
 
 #include "platform/app_window.h"
+#include "platform/paths.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -17,7 +18,13 @@ ImGuiHost::ImGuiHost(AppWindow& window, std::filesystem::path ui_font)
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.IniFilename = nullptr; // layout is application state, not imgui.ini
+
+    // Dock/window layout persists next to settings.json. Existence is
+    // recorded before ImGui's first NewFrame (which loads the file) so
+    // the application can tell a first run from a restored one.
+    layout_ini_path_ = (config_dir() / "layout.ini").string();
+    layout_file_existed_ = std::filesystem::exists(layout_ini_path_);
+    io.IniFilename = layout_ini_path_.c_str();
 
     if (!ImGui_ImplGlfw_InitForOpenGL(window_.native_handle(), /*install_callbacks=*/true)) {
         ImGui::DestroyContext();

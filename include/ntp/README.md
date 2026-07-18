@@ -5,7 +5,12 @@ MIT with a plugin exception (`../../LICENSES/NTP-MIT.txt`) — deliberately
 more permissive than the GPLv3 application so plugin authors and host
 implementers are never required to adopt the GPL.
 
-Contents land with the NTP stage
-(`../../Docs/Plan_NativePort/07-plugins-ntp.md`): the manifest schema as
-C structs and, post-v1, the `native_stage` C ABI. Headers here are C
-(not C++) — they define a stable interface boundary.
+Contents:
+
+- `ntp_manifest.h` — the NTP v1 manifest schema as plain C++ structs
+  (`../../Docs/Plan_NativePort/07-plugins-ntp.md`), for hosts and
+  tooling.
+- `ntp_stage_abi.h` — the `native_stage` C ABI, version 1
+  (`../../Docs/Plan_PostV1/10-native-stage-abi.md`): the frozen
+  interface stage binaries build against. Plain C99; compiles as C or
+  C++; growth is additive only.

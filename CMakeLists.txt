@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(NanoTracker
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "NanoTracker — native music tracker"
     LANGUAGES C CXX)
 
@@ -365,6 +365,7 @@ add_executable(nanotracker
     src/plugins/image_decode.cpp
     src/plugins/ntp_graph.cpp
     src/plugins/ntp_loader.cpp
+    src/plugins/ntp_stage_host.cpp
     src/plugins/plugin_registry.cpp
     src/plugins/ntp_voices.cpp
     src/plugins/preset_bank.cpp

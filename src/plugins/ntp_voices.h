@@ -10,7 +10,10 @@
 //
 // Scope rules: sampler nodes are always shared — their polyphony is
 // internal (zones/choke/round-robin state is instance-wide, matching
-// the web's sampler node). Everything else honours the manifest scope.
+// the web's sampler node). Native stages are always shared too: the C
+// ABI is instance-scoped, one stage instance per plugin instance, no
+// voice concept (ntp_stage_abi.h). Everything else honours the
+// manifest scope.
 //
 // Modulation model: routes evaluate at block rate from the source's
 // previous block (one-block mod latency — the price of arbitrary
@@ -130,6 +133,15 @@ public:
     [[nodiscard]] const std::map<std::string, SlotOverride>& slot_overrides() const {
         return slot_overrides_;
     }
+
+    // ── Native stages (session thread) ───────────────────────────────
+    // Opaque ABI state chunk of the named native_stage node (empty
+    // when the node is not a stage or the stage has no state). These
+    // chunks are session-live only: .ftrk v14 has no NTP-instance
+    // state block — WPBR's paramSnapshot covers parameters — so
+    // persisting them is a future additive block, not invented here.
+    [[nodiscard]] std::vector<std::uint8_t> native_stage_state(const std::string& node_id);
+    bool set_native_stage_state(const std::string& node_id, const std::vector<std::uint8_t>& chunk);
 
 private:
     struct NodeInstantiation {

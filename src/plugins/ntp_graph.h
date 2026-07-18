@@ -69,10 +69,25 @@ struct ParamSlot {
 
 inline constexpr int kMaxParamSlots = 12;
 
+// Native-stage descriptors bridge into the same slots (the loader
+// refuses descriptors beyond the host bound).
+static_assert(kNativeStageMaxParams <= static_cast<std::uint32_t>(kMaxParamSlots));
+
 class NodeRuntime {
 public:
     NodeRuntime(const ntp::DspNode& def, const LoadedNtpPlugin& plugin, std::uint32_t rate,
                 std::uint32_t seed);
+
+    // Destroys the native-stage instance when one exists. Runtimes are
+    // built and destroyed off the audio thread (the registry retires
+    // instances rather than freeing them mid-playback), which is
+    // exactly the ABI's create/destroy threading contract.
+    ~NodeRuntime();
+
+    NodeRuntime(const NodeRuntime&) = delete;
+    NodeRuntime& operator=(const NodeRuntime&) = delete;
+    NodeRuntime(NodeRuntime&&) = delete;
+    NodeRuntime& operator=(NodeRuntime&&) = delete;
 
     // Renders `frames` into out (stereo interleaved) from the summed
     // input. `controls` supplies the per-voice signals (null for
@@ -152,6 +167,17 @@ private:
     audio::ConvolutionEngine conv_engine_l_, conv_engine_r_;
     std::vector<float> conv_in_, conv_out_;
 
+    // native stage — the validated interface (owned by the plugin's
+    // NativeStageBinary, which the registry keeps alive for as long as
+    // any runtime exists) and this runtime's instance. The l/r vectors
+    // deinterleave one kNtpBlockFrames block per call; stage_params_
+    // carries the block-rate values in descriptor order.
+    const ntp_stage_interface_t* stage_ = nullptr;
+    void* stage_instance_ = nullptr;
+    std::vector<float> stage_in_l_, stage_in_r_;
+    std::vector<float> stage_out_l_, stage_out_r_;
+    std::array<float, kMaxParamSlots> stage_params_{};
+
     // sampler
     struct SamplerVoice {
         bool active = false;
@@ -217,6 +243,17 @@ public:
     // fallback. The caller owns `buffer` and must keep it alive until
     // the reclamation fence proves the swap-out (see zone_override_).
     void set_slot_override_buffer(const std::string& slot_id, const audio::SampleBuffer* buffer);
+
+    // ── Native stage (no-ops on other node types) ────────────────────
+    // Audio thread (kSetBundle drain): trampolines the ABI reset() —
+    // clears the stage's DSP tails. Nullable in the ABI (no-op then).
+    void native_stage_reset();
+
+    // Session thread: the stage's opaque ABI state chunk. Empty when
+    // the stage exports no state functions or has nothing to save;
+    // load refuses empty chunks per the ABI contract.
+    [[nodiscard]] std::vector<std::uint8_t> native_stage_state();
+    bool set_native_stage_state(const std::uint8_t* bytes, std::size_t size);
 };
 
 } // namespace nt::plugins

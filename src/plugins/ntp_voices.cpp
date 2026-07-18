@@ -49,9 +49,11 @@ NtpInstance::NtpInstance(LoadedNtpPlugin& plugin, std::uint32_t rate)
         const ntp::DspNode& def = manifest.graph.nodes[n];
         GraphNode& node = nodes_[n];
         node.def_index = static_cast<int>(n);
-        // Samplers are always shared: their polyphony is internal.
+        // Samplers are always shared (their polyphony is internal);
+        // native stages too (the C ABI is instance-scoped).
         node.voice_scoped = is_instrument_ && def.scope == ntp::NodeScope::kVoice &&
-                            def.type != ntp::NodeType::kSampler;
+                            def.type != ntp::NodeType::kSampler &&
+                            def.type != ntp::NodeType::kNativeStage;
         const int count = node.voice_scoped ? pool : 1;
         node.slots.resize(static_cast<std::size_t>(count));
         for (int s = 0; s < count; ++s) {
@@ -422,11 +424,34 @@ void NtpInstance::plugin_reset() {
         voice.controls.gate = 0.0F;
     }
     for (GraphNode& node : nodes_) {
-        if (plugin_->manifest.graph.nodes[static_cast<std::size_t>(node.def_index)].type ==
-            ntp::NodeType::kSampler) {
+        const ntp::NodeType type =
+            plugin_->manifest.graph.nodes[static_cast<std::size_t>(node.def_index)].type;
+        if (type == ntp::NodeType::kSampler) {
             node.slots[0].runtime->sampler_reset();
+        } else if (type == ntp::NodeType::kNativeStage) {
+            node.slots[0].runtime->native_stage_reset();
         }
     }
+}
+
+std::vector<std::uint8_t> NtpInstance::native_stage_state(const std::string& node_id) {
+    const int index = node_index_by_id(node_id);
+    if (index < 0 || plugin_->manifest.graph.nodes[static_cast<std::size_t>(index)].type !=
+                         ntp::NodeType::kNativeStage) {
+        return {};
+    }
+    return nodes_[static_cast<std::size_t>(index)].slots[0].runtime->native_stage_state();
+}
+
+bool NtpInstance::set_native_stage_state(const std::string& node_id,
+                                         const std::vector<std::uint8_t>& chunk) {
+    const int index = node_index_by_id(node_id);
+    if (index < 0 || plugin_->manifest.graph.nodes[static_cast<std::size_t>(index)].type !=
+                         ntp::NodeType::kNativeStage) {
+        return false;
+    }
+    return nodes_[static_cast<std::size_t>(index)].slots[0].runtime->set_native_stage_state(
+        chunk.data(), chunk.size());
 }
 
 std::shared_ptr<audio::SampleBuffer> NtpInstance::set_slot_override(const std::string& slot_id,

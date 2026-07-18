@@ -1,11 +1,11 @@
 // platform/imgui_context — Dear ImGui lifetime and per-frame plumbing.
-// Owns backend init/teardown, docking configuration, and the Kode Mono
-// font atlas including DPI-aware rebuilds. Layout persistence is
-// deliberately disabled here (io.IniFilename = nullptr): window
-// placement belongs to the application's own state, never imgui.ini.
+// Owns backend init/teardown, docking configuration, layout persistence
+// (io.IniFilename → config_dir()/layout.ini) and the Kode Mono font
+// atlas including DPI-aware rebuilds.
 #pragma once
 
 #include <filesystem>
+#include <string>
 
 namespace nt::platform {
 
@@ -40,6 +40,11 @@ public:
     // backend's own enter callback disables that fallback for the run.
     void enable_scripted_mouse();
 
+    // False when no layout.ini existed at construction — the first run
+    // on this config. The application builds its default dock layout in
+    // that case; otherwise ImGui restores the saved one.
+    [[nodiscard]] bool layout_file_existed() const { return layout_file_existed_; }
+
     static constexpr float kFontSizePx = 16.0F;
 
 private:
@@ -47,6 +52,9 @@ private:
 
     AppWindow& window_;
     std::filesystem::path ui_font_;
+    // io.IniFilename aliases this string for the context's lifetime.
+    std::string layout_ini_path_;
+    bool layout_file_existed_ = false;
     float font_scale_ = 1.0F;
 };
 

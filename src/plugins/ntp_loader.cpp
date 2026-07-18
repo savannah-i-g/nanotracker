@@ -300,15 +300,31 @@ ntp::DspNode parse_node(const json& j, std::vector<std::string>& errors, bool is
         return node;
     }
     node.type = *type;
-    if (node.type == ntp::NodeType::kNativeStage) {
-        errors.push_back("node \"" + node.id +
-                         "\": native_stage is reserved for a future C-ABI stage and is not "
-                         "loadable in NTP v1");
-    }
     const std::string scope = j.value("scope", is_instrument ? "voice" : "shared");
     node.scope = scope == "voice" ? ntp::NodeScope::kVoice : ntp::NodeScope::kShared;
     if (!is_instrument) {
         node.scope = ntp::NodeScope::kShared; // FX graphs are all-shared
+    }
+    if (node.type == ntp::NodeType::kNativeStage) {
+        // Instance-scoped by definition (the C ABI has no voice
+        // concept — ntp_stage_abi.h): an explicit voice scope is an
+        // authoring error, and the implicit instrument default is
+        // corrected quietly.
+        node.scope = ntp::NodeScope::kShared;
+        if (j.value("scope", "") == "voice") {
+            errors.push_back("node \"" + node.id +
+                             "\": native_stage is instance-scoped — remove scope \"voice\"");
+        }
+        node.stage_name = j.value("stage", "");
+        if (node.stage_name.empty()) {
+            errors.push_back("node \"" + node.id +
+                             "\": native_stage needs a stage (binary basename)");
+        } else if (node.stage_name.find('/') != std::string::npos ||
+                   node.stage_name.find('\\') != std::string::npos ||
+                   node.stage_name.find("..") != std::string::npos) {
+            errors.push_back("node \"" + node.id + "\": stage \"" + node.stage_name +
+                             "\" must be a bare basename (no path separators)");
+        }
     }
 
     node.gain = j.value("gain", node.gain);
@@ -846,6 +862,35 @@ const std::vector<std::uint8_t>* find_asset(const ArchiveFiles& files, const std
     return it != files.by_path.end() ? &it->second : nullptr;
 }
 
+// Platform tags that do ship a binary for `stage_name`, for the
+// strict missing-platform refusal ("archive provides: …"). Matches
+// binaries/<tag>/<stage_name>.<any extension> so a Windows-only
+// archive names windows-x86_64 to a Linux user and vice versa.
+std::vector<std::string> native_stage_tags_present(const ArchiveFiles& files,
+                                                   const std::string& stage_name) {
+    const std::string stem_wanted = lower(stage_name);
+    std::vector<std::string> tags;
+    for (const auto& [path, bytes] : files.by_path) {
+        if (!path.starts_with("binaries/")) {
+            continue;
+        }
+        const std::size_t slash = path.find('/', 9);
+        if (slash == std::string::npos || path.find('/', slash + 1) != std::string::npos) {
+            continue; // not the binaries/<tag>/<file> shape
+        }
+        const std::string file = path.substr(slash + 1);
+        const std::size_t dot = file.rfind('.');
+        if ((dot == std::string::npos ? file : file.substr(0, dot)) != stem_wanted) {
+            continue;
+        }
+        const std::string tag = path.substr(9, slash - 9);
+        if (std::find(tags.begin(), tags.end(), tag) == tags.end()) {
+            tags.push_back(tag);
+        }
+    }
+    return tags;
+}
+
 } // namespace
 
 std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std::size_t size,
@@ -974,6 +1019,39 @@ std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std:
             break;
         default:
             break;
+        }
+    }
+
+    // ── Native stages ────────────────────────────────────────────────
+    // Trust boundary: these nodes execute code. The current platform's
+    // binary must exist (a missing one is refused listing the tags the
+    // archive does ship) and must validate — version gate first, then
+    // descriptor sanity and a create probe (ntp_stage_host).
+    for (const ntp::DspNode& node : plugin->manifest.graph.nodes) {
+        if (node.type != ntp::NodeType::kNativeStage || node.stage_name.empty()) {
+            continue;
+        }
+        plugin->executes_native_code = true;
+        if (plugin->stages.contains(node.stage_name)) {
+            continue; // several nodes may share one binary
+        }
+        const std::string tag = native_stage_platform_tag();
+        const std::vector<std::uint8_t>* bytes =
+            find_asset(files, native_stage_archive_path(node.stage_name, tag));
+        if (bytes == nullptr) {
+            std::string present;
+            for (const std::string& t : native_stage_tags_present(files, node.stage_name)) {
+                present += present.empty() ? t : ", " + t;
+            }
+            errors.push_back("node \"" + node.id + "\": native stage \"" + node.stage_name +
+                             "\" has no binary for this platform (" + tag + ") — archive provides" +
+                             (present.empty() ? " none" : ": " + present));
+            continue;
+        }
+        auto binary = NativeStageBinary::open(node.stage_name, bytes->data(), bytes->size(),
+                                              device_rate, errors);
+        if (binary != nullptr) {
+            plugin->stages[node.stage_name] = std::move(binary);
         }
     }
 

@@ -234,9 +234,11 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
     return closable && !open;
 }
 
-void WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settings& settings) {
+bool WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settings& settings,
+                                        const Theme& theme) {
     ImGui::SetNextWindowSize(ImVec2{300, 0}, ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("workspace")) {
+    const bool visible = ImGui::Begin("workspace");
+    if (visible) {
         if (ImGui::Button("add SUM node")) {
             session.add_sum_node();
         }
@@ -258,6 +260,16 @@ void WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settin
         for (const auto& plugin : session.plugin_registry().all()) {
             ImGui::PushID(plugin->manifest.id.c_str());
             ImGui::TextUnformatted(plugin->manifest.name.c_str());
+            // Trust surface (Plan_PostV1/10): native-stage archives
+            // execute code — marked in the catalogue, never silent.
+            if (plugin->executes_native_code) {
+                ImGui::SameLine();
+                ImGui::TextColored(theme.primary, "[native code]");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("this plugin executes native code shipped in its archive\n"
+                                      "load it only if you trust the author");
+                }
+            }
             ImGui::SameLine();
             if (ImGui::SmallButton("add to workspace")) {
                 session.add_plugin_node(plugin->manifest.id);
@@ -315,10 +327,20 @@ void WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settin
         }
     }
     ImGui::End();
+    return visible;
 }
 
 void WorkspaceView::draw(app::ProjectSession& session, io::Settings& settings, const Theme& theme) {
     anchors_.clear();
+
+    // The patchbay (node windows + cable overlay) shows only while the
+    // workspace window itself is visible — in the docked layout the
+    // node panels would otherwise float over whichever center tab is
+    // active. Skipping the draw skips geometry write-back too, which
+    // is fine: nothing moves while hidden.
+    if (!draw_control_window(session, settings, theme)) {
+        return;
+    }
 
     // Node windows write geometry back into the model; close requests
     // collect during the loop and dispatch after so the vector stays
@@ -343,8 +365,6 @@ void WorkspaceView::draw(app::ProjectSession& session, io::Settings& settings, c
         status_ttl_ = 4.0F;
     }
     status_ttl_ = std::max(0.0F, status_ttl_ - ImGui::GetIO().DeltaTime);
-
-    draw_control_window(session, settings);
 }
 
 } // namespace nt::ui

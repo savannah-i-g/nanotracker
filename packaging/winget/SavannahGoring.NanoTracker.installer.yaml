@@ -1,0 +1,14 @@
+# Staged winget installer manifest — submit at Windows GA promotion.
+PackageIdentifier: SavannahGoring.NanoTracker
+PackageVersion: 1.0.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: nanotracker.exe
+    PortableCommandAlias: nanotracker
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/savannah-i-g/nanotracker/releases/download/vTODO/nanotracker-windows-x64.zip
+    InstallerSha256: TODO-FILL-FROM-RELEASE
+ManifestType: installer
+ManifestVersion: 1.6.0

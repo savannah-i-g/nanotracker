@@ -1,6 +1,7 @@
 // Application entry point: settings → window → ImGui → theme → CRT
-// pass → audio engine, then the frame loop. The shell UI here is the
-// Stage 1/2 surface; tracker views replace it as they land.
+// pass → audio engine, then the frame loop. Owns the main menu bar,
+// the dock layout (default DAW arrangement, first-run build, VIEW →
+// reset) and the transport shell strip; tracker views live in ui/.
 #include "api/local_api.h"
 #include "app/autosave.h"
 #include "app/input_script.h"
@@ -32,6 +33,8 @@
 #include "ui/theme.h"
 #include "ui/workspace_view.h"
 
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -43,6 +46,7 @@
 #include <filesystem>
 #include <glad/gl.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -248,104 +252,101 @@ void load_and_play(nt::audio::AudioEngine& audio, SampleRegistry& samples, const
                 .sample = samples.back().get()});
 }
 
-void draw_audio_section(nt::audio::AudioEngine& audio, SampleRegistry& samples) {
-    static std::array<char, 512> path_buf{};
-    static std::string load_status;
-    static bool tone_on = false;
-    static float tone_freq = 440.0F;
-
-    ImGui::SeparatorText("audio");
-
-    if (!audio.running()) {
-        ImGui::TextWrapped("audio device failed: %s", audio.device().error());
-        return;
-    }
-
-    const nt::audio::EngineSnapshot& snap = audio.snapshot();
-    ImGui::TextDisabled("%s @ %u Hz, %llu pulls, %llu dropped cmds", audio.device().backend_name(),
-                        snap.sample_rate, static_cast<unsigned long long>(snap.pulls),
-                        static_cast<unsigned long long>(audio.dropped_commands()));
-
-    if (ImGui::Checkbox("test tone", &tone_on)) {
-        audio.send({.type = tone_on ? nt::audio::Command::Type::kToneOn
-                                    : nt::audio::Command::Type::kToneOff,
-                    .value = 0.0F,
-                    .sample = nullptr});
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(160.0F);
-    if (ImGui::SliderFloat("Hz", &tone_freq, 55.0F, 3520.0F, "%.0f",
-                           ImGuiSliderFlags_Logarithmic)) {
-        audio.send(
-            {.type = nt::audio::Command::Type::kToneFreq, .value = tone_freq, .sample = nullptr});
-    }
-
-    ImGui::InputTextWithHint("##wav", "path/to/sample.wav", path_buf.data(), path_buf.size());
-    ImGui::SameLine();
-    if (ImGui::Button("load & play")) {
-        load_and_play(audio, samples, path_buf.data(), load_status);
-    }
-    if (!load_status.empty()) {
-        ImGui::TextDisabled("%s", load_status.c_str());
-    }
-
-    if (snap.transport_playing) {
-        ImGui::TextDisabled("transport: order %d pattern %d row %02d tick %d  %d bpm spd %d",
-                            snap.order_pos, snap.pattern_index, snap.row, snap.tick, snap.bpm,
-                            snap.speed);
-    }
-
-    // Ballistic peak meters: instant attack, exponential release
-    // (~2 s to the floor) — transients register at full height and
-    // the fall reads at any frame rate.
-    static float meter_l = 0.0F;
-    static float meter_r = 0.0F;
-    const float release = std::exp(-ImGui::GetIO().DeltaTime * 3.0F);
-    meter_l = std::max(snap.peak_l, meter_l * release);
-    meter_r = std::max(snap.peak_r, meter_r * release);
-    ImGui::ProgressBar(meter_l, ImVec2(-1.0F, 4.0F), "");
-    ImGui::ProgressBar(meter_r, ImVec2(-1.0F, 4.0F), "");
-}
-
 struct ShellState {
     bool show_help = false;
     bool show_licences = false;
     bool show_export = false;
 };
 
-const nt::ui::Theme* draw_shell_window(const nt::ui::Theme* active, nt::io::Settings& settings,
-                                       nt::audio::AudioEngine& audio, SampleRegistry& samples,
-                                       nt::app::ProjectSession& session,
-                                       nt::app::Autosave& autosave, ShellState& shell) {
-    ImGui::SetNextWindowSize(ImVec2(430, 330), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("nanoTracker shell")) {
-        ImGui::TextDisabled("%s %s — platform shell", nt::kAppName, nt::kVersionString);
-        ImGui::Separator();
+// Per-window visibility, driven by the VIEW menu. Defaults mirror the
+// pre-menu surface: everything visible except the on-demand
+// help/licences/export toggles (ShellState).
+struct WindowVisibility {
+    bool shell = true;
+    bool pattern = true;
+    bool piano_roll = true;
+    bool workspace = true;
+    bool fx_mixer = true;
+    bool module = true;
+    bool samples = true;
+    bool instruments = true;
+    bool sample_browser = true;
+    bool midi = true;
+    bool local_api = true;
+};
 
-        if (ImGui::BeginCombo("theme", active->name)) {
-            for (const nt::ui::Theme& t : nt::ui::themes()) {
-                const bool selected = (&t == active);
-                if (ImGui::Selectable(t.name, selected)) {
-                    active = &t;
-                    settings.theme_id = t.id;
-                    nt::ui::apply_theme(t);
-                }
-                if (selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
+// The dock layout's top strip. Theme/CRT moved to the SETTINGS menu and
+// project I/O to the FILE menu, so what remains reads like a DAW
+// transport bar: transport controls, engine status, peak meters.
+void draw_shell_window(nt::audio::AudioEngine& audio, nt::app::ProjectSession& session,
+                       nt::app::Autosave& autosave) {
+    static bool tone_on = false;
+    static float tone_freq = 440.0F;
+
+    ImGui::SetNextWindowSize(ImVec2(430, 140), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("nanoTracker shell")) {
+        const nt::audio::EngineSnapshot& snap = audio.snapshot();
+
+        // ── Transport row ────────────────────────────────────────────
+        if (ImGui::Button(snap.transport_playing ? "STOP (F5)" : "PLAY (F5)")) {
+            if (snap.transport_playing) {
+                session.stop();
+            } else {
+                session.play();
             }
-            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::Text("BPM %d  SPD %d", session.project().bpm, session.project().speed);
+        if (snap.transport_playing) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("ord %d  pat %d  row %02d", snap.order_pos, snap.pattern_index,
+                                snap.row);
+        }
+        // App identity + frame rate, right-aligned on the transport row.
+        std::array<char, 96> id_line{};
+        std::snprintf(id_line.data(), id_line.size(), "%s %s  %.1f fps", nt::kAppName,
+                      nt::kVersionString, static_cast<double>(ImGui::GetIO().Framerate));
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() -
+                                                             ImGui::CalcTextSize(id_line.data()).x -
+                                                             ImGui::GetStyle().WindowPadding.x));
+        ImGui::TextDisabled("%s", id_line.data());
+
+        // ── Engine status row + meters ───────────────────────────────
+        if (!audio.running()) {
+            ImGui::TextWrapped("audio device failed: %s", audio.device().error());
+        } else {
+            ImGui::TextDisabled("%s @ %u Hz, %llu pulls, %llu dropped cmds",
+                                audio.device().backend_name(), snap.sample_rate,
+                                static_cast<unsigned long long>(snap.pulls),
+                                static_cast<unsigned long long>(audio.dropped_commands()));
+            ImGui::SameLine();
+            if (ImGui::Checkbox("test tone", &tone_on)) {
+                audio.send({.type = tone_on ? nt::audio::Command::Type::kToneOn
+                                            : nt::audio::Command::Type::kToneOff,
+                            .value = 0.0F,
+                            .sample = nullptr});
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(160.0F);
+            if (ImGui::SliderFloat("Hz", &tone_freq, 55.0F, 3520.0F, "%.0f",
+                                   ImGuiSliderFlags_Logarithmic)) {
+                audio.send({.type = nt::audio::Command::Type::kToneFreq,
+                            .value = tone_freq,
+                            .sample = nullptr});
+            }
+
+            // Ballistic peak meters: instant attack, exponential release
+            // (~2 s to the floor) — transients register at full height
+            // and the fall reads at any frame rate.
+            static float meter_l = 0.0F;
+            static float meter_r = 0.0F;
+            const float release = std::exp(-ImGui::GetIO().DeltaTime * 3.0F);
+            meter_l = std::max(snap.peak_l, meter_l * release);
+            meter_r = std::max(snap.peak_r, meter_r * release);
+            ImGui::ProgressBar(meter_l, ImVec2(-1.0F, 4.0F), "");
+            ImGui::ProgressBar(meter_r, ImVec2(-1.0F, 4.0F), "");
         }
 
-        ImGui::Checkbox("CRT effect", &settings.crt_enabled);
-        ImGui::BeginDisabled(!settings.crt_enabled);
-        ImGui::SliderFloat("intensity", &settings.crt_intensity, 0.0F, 1.0F, "%.2f");
-        ImGui::EndDisabled();
-
-        draw_audio_section(audio, samples);
-
-        // ── Project I/O ──────────────────────────────────────────────
-        ImGui::SeparatorText("project");
         if (autosave.previous_run_crashed() && !autosave.latest_slot().empty()) {
             ImGui::TextWrapped("previous session did not exit cleanly");
             ImGui::SameLine();
@@ -355,46 +356,226 @@ const nt::ui::Theme* draw_shell_window(const nt::ui::Theme* active, nt::io::Sett
                 }
             }
         }
-        static std::array<char, 512> project_path{};
-        ImGui::SetNextItemWidth(220.0F);
-        ImGui::InputTextWithHint("##proj", "path/to/song.ftrk", project_path.data(),
-                                 project_path.size());
-        ImGui::SameLine();
-        if (ImGui::SmallButton("save")) {
-            if (!session.save_ftrk(project_path.data())) {
-                std::fprintf(stderr, "save: %s\n", session.error().c_str());
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("load")) {
-            if (!session.load_file(project_path.data())) {
-                std::fprintf(stderr, "load: %s\n", session.error().c_str());
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("export")) {
-            shell.show_export = !shell.show_export;
-        }
-
-        ImGui::Separator();
-        if (ImGui::SmallButton("help")) {
-            shell.show_help = !shell.show_help;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("licences")) {
-            shell.show_licences = !shell.show_licences;
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("%.1f fps", static_cast<double>(ImGui::GetIO().Framerate));
     }
     ImGui::End();
+}
+
+// One path-prompt modal (FILE → open… / save as…). Centred on appear;
+// Enter in the field accepts. Returns true when confirmed with a
+// non-empty path.
+bool draw_path_dialog(const char* title, const char* verb, std::array<char, 512>& path) {
+    bool accepted = false;
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
+    if (ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::SetNextItemWidth(420.0F);
+        const bool entered =
+            ImGui::InputTextWithHint("##path", "path/to/song.ftrk", path.data(), path.size(),
+                                     ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::Button(verb) || entered) {
+            accepted = path[0] != '\0';
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    return accepted;
+}
+
+// The main menu bar. Every action routes through the exact session/
+// settings paths the shell window used — the menu is an additional
+// surface, never new semantics. Returns the active theme (SETTINGS can
+// switch it). `reset_layout` arms the dock rebuild consumed at the
+// frame's dockspace point.
+const nt::ui::Theme* draw_main_menu_bar(const nt::ui::Theme* active, nt::io::Settings& settings,
+                                        nt::audio::AudioEngine& audio,
+                                        nt::app::ProjectSession& session,
+                                        nt::platform::AppWindow& window, ShellState& shell,
+                                        WindowVisibility& vis, bool& reset_layout) {
+    // Last-used project path, shared by open/save/save-as (previously
+    // the shell window's path box).
+    static std::array<char, 512> project_path{};
+    bool want_open_dialog = false;
+    bool want_save_dialog = false;
+
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("FILE")) {
+            if (ImGui::MenuItem("new project")) {
+                session.new_project();
+            }
+            if (ImGui::MenuItem("open...")) {
+                want_open_dialog = true;
+            }
+            ImGui::Separator();
+            // "save" reuses the last path and falls through to the
+            // dialog when none is set yet.
+            if (ImGui::MenuItem("save")) {
+                if (project_path[0] == '\0') {
+                    want_save_dialog = true;
+                } else if (!session.save_ftrk(project_path.data())) {
+                    std::fprintf(stderr, "save: %s\n", session.error().c_str());
+                }
+            }
+            if (ImGui::MenuItem("save as...")) {
+                want_save_dialog = true;
+            }
+            if (ImGui::MenuItem("export...", nullptr, shell.show_export)) {
+                shell.show_export = !shell.show_export;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("quit")) {
+                // The platform close path: the frame loop exits through
+                // window.should_close() and shutdown runs normally.
+                glfwSetWindowShouldClose(window.native_handle(), GLFW_TRUE);
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("EDIT")) {
+            nt::app::UndoStack& undo = session.undo();
+            if (ImGui::MenuItem("undo", "Ctrl+Z", false, undo.can_undo())) {
+                undo.undo();
+            }
+            if (ImGui::MenuItem("redo", "Ctrl+Y", false, undo.can_redo())) {
+                undo.redo();
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("VIEW")) {
+            ImGui::MenuItem("nanoTracker shell", nullptr, &vis.shell);
+            ImGui::MenuItem("PATTERN", nullptr, &vis.pattern);
+            ImGui::MenuItem("piano roll", nullptr, &vis.piano_roll);
+            ImGui::MenuItem("workspace", nullptr, &vis.workspace);
+            ImGui::MenuItem("FX MIXER", nullptr, &vis.fx_mixer);
+            ImGui::MenuItem("MODULE", nullptr, &vis.module);
+            ImGui::MenuItem("SAMPLES", nullptr, &vis.samples);
+            ImGui::MenuItem("INSTRUMENTS", nullptr, &vis.instruments);
+            ImGui::MenuItem("SAMPLE BROWSER", nullptr, &vis.sample_browser);
+            ImGui::MenuItem("midi", nullptr, &vis.midi);
+            ImGui::MenuItem("LOCAL API", nullptr, &vis.local_api);
+            ImGui::MenuItem("EXPORT", nullptr, &shell.show_export);
+            ImGui::Separator();
+            if (ImGui::MenuItem("reset layout")) {
+                reset_layout = true;
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("SETTINGS")) {
+            if (ImGui::BeginMenu("theme")) {
+                for (const nt::ui::Theme& t : nt::ui::themes()) {
+                    if (ImGui::MenuItem(t.name, nullptr, &t == active) && &t != active) {
+                        active = &t;
+                        settings.theme_id = t.id;
+                        nt::ui::apply_theme(t);
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::MenuItem("CRT effect", nullptr, &settings.crt_enabled);
+            ImGui::BeginDisabled(!settings.crt_enabled);
+            ImGui::SetNextItemWidth(140.0F);
+            ImGui::SliderFloat("intensity", &settings.crt_intensity, 0.0F, 1.0F, "%.2f");
+            ImGui::EndDisabled();
+            ImGui::Separator();
+            if (audio.running()) {
+                ImGui::TextDisabled("%s @ %u Hz", audio.device().backend_name(),
+                                    audio.snapshot().sample_rate);
+            } else {
+                ImGui::TextDisabled("audio device unavailable");
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("HELP")) {
+            ImGui::MenuItem("help", nullptr, &shell.show_help);
+            ImGui::MenuItem("licences", nullptr, &shell.show_licences);
+            ImGui::Separator();
+            std::array<char, 64> version_line{};
+            std::snprintf(version_line.data(), version_line.size(), "%s %s", nt::kAppName,
+                          nt::kVersionString);
+            ImGui::MenuItem(version_line.data(), nullptr, false, false);
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
+    // Popups open outside the menu scope so their ids resolve where
+    // BeginPopupModal submits them (the classic OpenPopup-in-menu trap).
+    if (want_open_dialog) {
+        ImGui::OpenPopup("open project");
+    }
+    if (want_save_dialog) {
+        ImGui::OpenPopup("save project as");
+    }
+    if (draw_path_dialog("open project", "open", project_path)) {
+        if (!session.load_file(project_path.data())) {
+            std::fprintf(stderr, "load: %s\n", session.error().c_str());
+        }
+    }
+    if (draw_path_dialog("save project as", "save", project_path)) {
+        if (!session.save_ftrk(project_path.data())) {
+            std::fprintf(stderr, "save: %s\n", session.error().c_str());
+        }
+    }
     return active;
+}
+
+// The standard DAW arrangement, rebuilt into the viewport dockspace:
+// transport strip across the top, pattern-dominant centre, sample
+// management along the bottom, utility rail on the right — the web
+// app's frame (menu/transport up top, grid centre, samples strip
+// below). help/licences stay floating. Runs before the dockspace
+// submits: on the first frame when no layout.ini existed, and on
+// VIEW → reset layout. User rearrangements persist via layout.ini
+// (platform/imgui_context).
+void build_dock_layout(ImGuiID dockspace_id) {
+    ImGui::DockBuilderRemoveNode(dockspace_id);
+    ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->WorkSize);
+
+    // Each ratio is of the node being split: strip heights come off
+    // first, then the rail takes 0.24 of what remains beside the
+    // centre.
+    ImGuiID center = dockspace_id;
+    ImGuiID top = 0;
+    ImGuiID bottom = 0;
+    ImGuiID right = 0;
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.14F, &top, &center);
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.26F, &bottom, &center);
+    ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.24F, &right, &center);
+
+    // A lone transport strip needs no tab bar.
+    if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(top)) {
+        node->SetLocalFlags(node->LocalFlags | ImGuiDockNodeFlags_AutoHideTabBar);
+    }
+
+    ImGui::DockBuilderDockWindow("nanoTracker shell", top);
+    ImGui::DockBuilderDockWindow("PATTERN", center);
+    ImGui::DockBuilderDockWindow("piano roll", center);
+    ImGui::DockBuilderDockWindow("workspace", center);
+    ImGui::DockBuilderDockWindow("FX MIXER", center);
+    ImGui::DockBuilderDockWindow("MODULE", center);
+    ImGui::DockBuilderDockWindow("SAMPLES", bottom);
+    ImGui::DockBuilderDockWindow("INSTRUMENTS", bottom);
+    ImGui::DockBuilderDockWindow("SAMPLE BROWSER", bottom);
+    ImGui::DockBuilderDockWindow("midi", right);
+    ImGui::DockBuilderDockWindow("LOCAL API", right);
+    ImGui::DockBuilderDockWindow("EXPORT", right);
+    ImGui::DockBuilderFinish(dockspace_id);
 }
 
 void draw_help_window(ShellState& shell) {
     if (!shell.show_help) {
         return;
     }
+    // Floating utility window: centred on each open, never part of the
+    // default dock layout.
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
     ImGui::SetNextWindowSize(ImVec2{460, 380}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("help", &shell.show_help)) {
         ImGui::SeparatorText("pattern editor");
@@ -434,6 +615,9 @@ void draw_licence_window(ShellState& shell) {
     if (!shell.show_licences) {
         return;
     }
+    // Floating utility window, same contract as draw_help_window.
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5F, 0.5F));
     ImGui::SetNextWindowSize(ImVec2{480, 340}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("licences", &shell.show_licences)) {
         ImGui::TextWrapped(
@@ -490,6 +674,18 @@ int main(int argc, char** argv) {
         nt::app::ProjectSession session(audio);
         nt::app::Autosave autosave(nt::platform::config_dir() / "autosave");
         ShellState shell;
+        WindowVisibility vis;
+        // Fixed dockspace id so the default layout can be built before
+        // the dockspace first submits. First run (no layout.ini) builds
+        // it; VIEW → reset layout re-arms the flag mid-session.
+        const ImGuiID dockspace_id = ImHashStr("nanoTrackerDockspace");
+        bool rebuild_dock_layout = !imgui.layout_file_existed();
+        int dock_focus_countdown = 0;
+        // Appearing windows steal focus on their first Begin (frame 1),
+        // which would override the tab selections restored from
+        // layout.ini at the next dock update. Clearing focus once after
+        // the first frame's submissions lets the saved layout stand.
+        bool clear_startup_focus = imgui.layout_file_existed();
         nt::ui::PatternView pattern_view;
         nt::ui::SampleView sample_view;
         nt::ui::SampleBrowserView sample_browser_view;
@@ -714,26 +910,75 @@ int main(int argc, char** argv) {
             crt.begin(fb_w, fb_h, theme->background.x, theme->background.y, theme->background.z);
 
             imgui.begin_frame();
-            ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
+            // Menu first (it can arm a dock rebuild), then the rebuild,
+            // then the dockspace submits and picks the nodes up.
+            theme = draw_main_menu_bar(theme, settings, audio, session, window, shell, vis,
+                                       rebuild_dock_layout);
+            if (rebuild_dock_layout) {
+                rebuild_dock_layout = false;
+                build_dock_layout(dockspace_id);
+                dock_focus_countdown = 4;
+            }
+            ImGui::DockSpaceOverViewport(dockspace_id, ImGui::GetMainViewport(),
                                          ImGuiDockNodeFlags_PassthruCentralNode);
-            theme = draw_shell_window(theme, settings, audio, samples, session, autosave, shell);
+            // Default front tabs after a rebuild. Tab selection tracks
+            // g.NavWindow once per node update and appearing windows
+            // steal focus on their first Begin, so the picks are staged
+            // one per frame; PATTERN comes last and keeps keyboard
+            // focus.
+            if (dock_focus_countdown > 0) {
+                --dock_focus_countdown;
+                if (dock_focus_countdown == 2) {
+                    ImGui::SetWindowFocus("midi");
+                } else if (dock_focus_countdown == 1) {
+                    ImGui::SetWindowFocus("SAMPLES");
+                } else if (dock_focus_countdown == 0) {
+                    ImGui::SetWindowFocus("PATTERN");
+                }
+            }
+            if (vis.shell) {
+                draw_shell_window(audio, session, autosave);
+            }
             draw_help_window(shell);
             draw_licence_window(shell);
             autosave.update(session, std::chrono::duration<double>(
                                          std::chrono::steady_clock::now().time_since_epoch())
                                          .count());
-            pattern_view.draw(session, audio.snapshot(), *theme);
-            module_view.draw(audio, module_player, *theme);
-            sample_view.draw(session, *theme);
+            if (vis.pattern) {
+                pattern_view.draw(session, audio.snapshot(), *theme);
+            }
+            if (vis.module) {
+                module_view.draw(audio, module_player, *theme);
+            }
+            if (vis.samples) {
+                sample_view.draw(session, *theme);
+            }
             // Auditioned files join `samples` (process-lifetime, same
             // contract as load & play); loads target the slot selected
             // in the SAMPLES window.
-            sample_browser_view.draw(session, audio, samples, sample_view.selected_slot(), *theme);
-            nt::ui::InstrumentTableView::draw(session, *theme);
-            nt::ui::FxMixerView::draw(session, *theme);
-            workspace_view.draw(session, settings, *theme);
-            piano_roll_view.draw(session, *theme);
-            midi_view.draw(session, *theme);
+            if (vis.sample_browser) {
+                sample_browser_view.draw(session, audio, samples, sample_view.selected_slot(),
+                                         *theme);
+            }
+            if (vis.instruments) {
+                nt::ui::InstrumentTableView::draw(session, *theme);
+            }
+            if (vis.fx_mixer) {
+                nt::ui::FxMixerView::draw(session, *theme);
+            }
+            if (vis.workspace) {
+                workspace_view.draw(session, settings, *theme);
+            }
+            if (vis.piano_roll) {
+                piano_roll_view.draw(session, *theme);
+            }
+            // The midi window's draw owns the device-ring drain
+            // (ui/midi_view.h), so hiding it also pauses device MIDI
+            // intake until re-shown; bus events (midi_record.update)
+            // are unaffected.
+            if (vis.midi) {
+                midi_view.draw(session, *theme);
+            }
             // Cabled master.midi.in events, drained after the MIDI
             // window's device drain: per frame, device notes apply
             // first, then bus notes (each source stays FIFO).
@@ -741,8 +986,14 @@ int main(int argc, char** argv) {
             // Queued Local API requests execute here — the frame loop
             // is the session's single consumer (api/local_api.h).
             local_api.process_pending(session, audio);
-            nt::ui::LocalApiView::draw(local_api, settings, *theme);
+            if (vis.local_api) {
+                nt::ui::LocalApiView::draw(local_api, settings, *theme);
+            }
             export_view.draw(session, *theme, shell.show_export);
+            if (clear_startup_focus) {
+                clear_startup_focus = false;
+                ImGui::SetWindowFocus(nullptr);
+            }
             session.update_clap_editors();
             session.update_vst3_editors();
             session.sweep_retired();

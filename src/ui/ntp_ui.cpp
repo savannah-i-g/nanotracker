@@ -564,6 +564,17 @@ void NtpUi::draw(app::ProjectSession& session, const std::string& workspace_id,
         return;
     }
 
+    // Trust surface (Plan_PostV1/10): an archive with native stages
+    // executes code, unlike pure-data NTP — the marker shows wherever
+    // the plugin UI shows, never silently.
+    if (plugin->executes_native_code) {
+        ImGui::TextColored(theme.primary, "[native code]");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("this plugin executes native code shipped in its archive\n"
+                              "load it only if you trust the author");
+        }
+    }
+
     // Presets: factory (manifest), project (PPRS), library (config
     // dir), plus save-to-library of the current parameter values.
     ImGui::SetNextItemWidth(150.0F);

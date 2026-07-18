@@ -164,7 +164,7 @@ TEST_CASE("manifest validation is strict and collects every error", "[ntp]") {
     CHECK(all.find("default outside range") != std::string::npos);
     CHECK(all.find("duplicate parameter key") != std::string::npos);
     CHECK(all.find("worklet") != std::string::npos);
-    CHECK(all.find("native_stage is reserved") != std::string::npos);
+    CHECK(all.find("native_stage needs a stage") != std::string::npos);
     CHECK(all.find("unknown type \"mystery\"") != std::string::npos);
     CHECK(all.find("unknown endpoint \"ghost\"") != std::string::npos);
     // "webview" is refused; "userSamples" is the one native capability

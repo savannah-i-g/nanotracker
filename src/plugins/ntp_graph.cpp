@@ -247,8 +247,31 @@ NodeRuntime::NodeRuntime(const ntp::DspNode& def, const LoadedNtpPlugin& plugin,
         }
         break;
     }
-    case ntp::NodeType::kNativeStage:
-        break; // never instantiated — the loader refuses it
+    case ntp::NodeType::kNativeStage: {
+        const auto it = plugin.stages.find(def.stage_name);
+        if (it != plugin.stages.end() && it->second != nullptr) {
+            stage_ = it->second->entry();
+            // Param slots alias the descriptor's id strings — owned by
+            // the loaded library, which the registry keeps alive (via
+            // the plugin, retired not unloaded) beyond every runtime.
+            const ntp_stage_descriptor_t& desc = *stage_->descriptor;
+            for (std::uint32_t p = 0; p < desc.param_count; ++p) {
+                add_param(desc.params[p].id, static_cast<float>(desc.params[p].default_value));
+            }
+            stage_instance_ = stage_->create(rate, kNtpBlockFrames);
+        }
+        stage_in_l_.assign(kNtpBlockFrames, 0.0F);
+        stage_in_r_.assign(kNtpBlockFrames, 0.0F);
+        stage_out_l_.assign(kNtpBlockFrames, 0.0F);
+        stage_out_r_.assign(kNtpBlockFrames, 0.0F);
+        break;
+    }
+    }
+}
+
+NodeRuntime::~NodeRuntime() {
+    if (stage_ != nullptr && stage_instance_ != nullptr) {
+        stage_->destroy(stage_instance_);
     }
 }
 
@@ -1015,10 +1038,68 @@ void NodeRuntime::process(const float* in, float* out, std::uint32_t frames,
     case ntp::NodeType::kSampler:
         process_sampler(out, frames);
         break;
-    case ntp::NodeType::kNativeStage:
-        std::fill_n(out, static_cast<std::size_t>(frames) * 2, 0.0F);
+    case ntp::NodeType::kNativeStage: {
+        if (stage_ == nullptr || stage_instance_ == nullptr) {
+            // Defensive only: the loader's create probe refuses
+            // archives whose stage cannot instantiate.
+            std::fill_n(out, static_cast<std::size_t>(frames) * 2, 0.0F);
+            break;
+        }
+        // Block-rate delivery, clamped to the descriptor's ranges per
+        // the ABI contract. Audio-rate `toParam` connections collapse
+        // to their frame-0 sample here — a native stage parameter is
+        // k-rate by definition.
+        const ntp_stage_descriptor_t& desc = *stage_->descriptor;
+        for (int p = 0; p < param_count_; ++p) {
+            const ntp_stage_param_info_t& info = desc.params[p];
+            stage_params_[static_cast<std::size_t>(p)] =
+                std::clamp(resolved(p, 0), static_cast<float>(info.min_value),
+                           static_cast<float>(info.max_value));
+        }
+        for (std::uint32_t i = 0; i < frames; ++i) {
+            stage_in_l_[i] = in[static_cast<std::size_t>(i) * 2];
+            stage_in_r_[i] = in[(static_cast<std::size_t>(i) * 2) + 1];
+        }
+        stage_->process(stage_instance_, stage_in_l_.data(), stage_in_r_.data(),
+                        stage_out_l_.data(), stage_out_r_.data(), frames,
+                        param_count_ > 0 ? stage_params_.data() : nullptr);
+        for (std::uint32_t i = 0; i < frames; ++i) {
+            out[static_cast<std::size_t>(i) * 2] = stage_out_l_[i];
+            out[(static_cast<std::size_t>(i) * 2) + 1] = stage_out_r_[i];
+        }
         break;
     }
+    }
+}
+
+void NodeRuntime::native_stage_reset() {
+    if (stage_ != nullptr && stage_instance_ != nullptr && stage_->reset != nullptr) {
+        stage_->reset(stage_instance_);
+    }
+}
+
+std::vector<std::uint8_t> NodeRuntime::native_stage_state() {
+    std::vector<std::uint8_t> chunk;
+    if (stage_ == nullptr || stage_instance_ == nullptr || stage_->state_size == nullptr) {
+        return chunk;
+    }
+    const std::uint32_t size = stage_->state_size(stage_instance_);
+    if (size == 0) {
+        return chunk; // "nothing to save" suppresses the save call
+    }
+    chunk.resize(size);
+    if (!stage_->state_save(stage_instance_, chunk.data(), size)) {
+        chunk.clear();
+    }
+    return chunk;
+}
+
+bool NodeRuntime::set_native_stage_state(const std::uint8_t* bytes, std::size_t size) {
+    if (stage_ == nullptr || stage_instance_ == nullptr || stage_->state_load == nullptr ||
+        size == 0) {
+        return false;
+    }
+    return stage_->state_load(stage_instance_, bytes, static_cast<std::uint32_t>(size));
 }
 
 } // namespace nt::plugins

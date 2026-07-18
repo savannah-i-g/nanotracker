@@ -4,8 +4,10 @@
 // containing `plugin.json` plus assets (samples, wavetables, impulses,
 // images). Everything in the archive is data: the DSP is a declarative
 // node graph the host interprets, and the UI is declarative controls
-// the host renders. Nothing in an archive executes — that is what makes
-// public plugin sharing safe.
+// the host renders. Nothing in an archive executes — with one loud
+// exception: a `native_stage` node names a compiled binary in the
+// archive (ntp_stage_abi.h). Hosts label such archives distinctly so
+// the trust decision is the user's, never silent.
 //
 // NTP has exactly one schema version (`"ntp": 1`). The web plugin
 // format's v1-v5 migration debt is not inherited; a converter maps web
@@ -47,9 +49,10 @@ struct ParamDef {
 
 // ── DSP graph ────────────────────────────────────────────────────────
 
-// The built-in node set. `kNativeStage` is reserved: parsed and
-// rejected with a clear message in v1, defined now so manifests stay
-// forward compatible with a post-v1 C-ABI escape hatch.
+// The built-in node set. `kNativeStage` is the C-ABI escape hatch
+// (ntp_stage_abi.h): the node names a shared library shipped in the
+// archive under binaries/<platform-tag>/. It is the one node kind that
+// executes code — hosts label such archives distinctly in the UI.
 enum class NodeType : unsigned char {
     kGain,
     kDelay,
@@ -185,6 +188,12 @@ struct DspNode {
     std::optional<SliceMap> slice_map;     // sampler
     int polyphony = 16;                    // sampler
     std::string voice_stealing = "oldest"; // sampler: +quietest|none
+
+    // native_stage (JSON "stage"): archive binary basename — the
+    // loader resolves binaries/<platform-tag>/<stage_name>.<ext>.
+    // Native stages are instance-scoped (the ABI has no voice
+    // concept); scope "voice" is refused at parse.
+    std::string stage_name;
 };
 
 // Endpoints are node ids, or the reserved names "input" / "output"

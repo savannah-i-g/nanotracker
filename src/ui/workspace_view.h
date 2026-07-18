@@ -36,7 +36,10 @@ private:
     void draw_jack(const graph::Node& node, const graph::Port& port, bool is_input,
                    const Theme& theme);
     void draw_collapsed_jack_strip(const graph::Node& node);
-    void draw_control_window(app::ProjectSession& session, io::Settings& settings);
+    // Returns true while the workspace window is visible (its dock tab
+    // selected) — the gate for the whole patchbay.
+    bool draw_control_window(app::ProjectSession& session, io::Settings& settings,
+                             const Theme& theme);
 
     CableOverlay overlay_;
     NtpUi plugin_ui_;
