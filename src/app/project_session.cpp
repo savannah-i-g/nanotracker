@@ -1293,6 +1293,14 @@ bool ProjectSession::playing() const {
     return audio_.snapshot().transport_playing;
 }
 
+void ProjectSession::set_tempo(int bpm, int speed) {
+    project_.bpm = std::clamp(bpm, 20, 255);
+    project_.speed = std::clamp(speed, 1, 31);
+    audio_.send({.type = audio::Command::Type::kSetTempo,
+                 .aux_int = project_.bpm,
+                 .aux_int2 = project_.speed});
+}
+
 void ProjectSession::set_cell(int pattern_index, int row, int channel,
                               const engine::TrackerCell& cell) {
     if (pattern_index < 0 || pattern_index >= static_cast<int>(project_.patterns.size())) {

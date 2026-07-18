@@ -3,6 +3,28 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — IT compressed samples fixed + live BPM (owner-driven)
+
+- Landed: the IT importer chose the 2.14-vs-2.15 decompression
+  variant from the file-wide `cmwt` — it is a per-sample property
+  (the sample `cvt` delta bit 0x04, exactly how Impulse Tracker and
+  libopenmpt decide it), so real files mixing both ran double-delta
+  over single-delta PCM into garbage. Fixed per-sample; the
+  bit-reader and width-change encodings were already bit-exact
+  against libopenmpt's decoder on the owner's file. Also: dropped
+  samples past the 31-slot cap now warn (with pattern-reference
+  warnings for cells naming them); uncompressed delta-PCM
+  integrates; split-stereo imports the left channel loudly.
+  **Editable BPM/SPD** in the transport (owner request mid-task):
+  `set_tempo` + `kSetTempo` reach the running play state next tick.
+  Four FIXES.md entries.
+- Verification: 133/133 both trees (compressed fixture with teeth:
+  8/16-bit × both variants × all width-change modes, cmwt
+  deliberately lying so any header-keyed decoder fails; guarded
+  owner-file test under ASan); owner file noise metric
+  diffRMS/RMS 1.29 → 0.066, full render musical (ZCR 0.042,
+  crest 6.45), zero decompressor warnings.
+
 ## 2026-07-18 — Stage 23 closed — Note entry, piano roll UX, module entry points
 
 - Landed: **NOTE ENTRY window** (`ui/note_entry_view`): octave /

@@ -120,6 +120,11 @@ struct Command {
         kModuleStop,     // stop module playback
         kPluginNoteOn,   // aux_int=(slot<<8)|midi_note, value=velocity
         kPluginNoteOff,  // aux_int=(slot<<8)|midi_note
+        kSetTempo,       // aux_int=bpm, aux_int2=speed (0 = leave that
+                         // field): live transport tempo — the next tick
+                         // recomputes its interval, so it is audible at
+                         // once. The project holds the persisted set
+                         // point; kTransportPlay re-seeds from it.
     };
     Type type = Type::kToneOff;
     float value = 0.0F;

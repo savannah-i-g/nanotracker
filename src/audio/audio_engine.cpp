@@ -87,6 +87,17 @@ void AudioEngine::drain_commands() {
         case Command::Type::kToneFreq:
             tone_freq_ = std::clamp(command.value, 20.0F, 20000.0F);
             break;
+        case Command::Type::kSetTempo:
+            // Live tempo edit. play_state_.bpm drives the per-tick
+            // interval and .speed the ticks-per-row, so both take effect
+            // from the next tick without disturbing the transport.
+            if (command.aux_int > 0) {
+                play_state_.bpm = std::clamp(command.aux_int, 20, 255);
+            }
+            if (command.aux_int2 > 0) {
+                play_state_.speed = std::clamp(command.aux_int2, 1, 31);
+            }
+            break;
         case Command::Type::kPlaySample:
             voice_sample_ = command.sample;
             voice_pos_ = 0;

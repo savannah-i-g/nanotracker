@@ -91,6 +91,11 @@ public:
     void stop();
     [[nodiscard]] bool playing() const;
 
+    // Sets the song tempo (BPM 20-255) and speed (ticks/row 1-31),
+    // clamped. Writes the project set point and, if the transport is
+    // running, pushes it live so the change is audible immediately.
+    void set_tempo(int bpm, int speed);
+
     // Cell edit routed through undo. Fields outside the pattern/row/
     // channel range are ignored.
     void set_cell(int pattern_index, int row, int channel, const engine::TrackerCell& cell);

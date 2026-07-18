@@ -302,7 +302,21 @@ void draw_shell_window(nt::audio::AudioEngine& audio, nt::app::ProjectSession& s
             }
         }
         ImGui::SameLine();
-        ImGui::Text("BPM %d  SPD %d", session.project().bpm, session.project().speed);
+        // Editable song tempo. The project value is the persisted set
+        // point; set_tempo also pushes it into a running transport so a
+        // mid-playback change is heard at once (drag, or ctrl+click to
+        // type). Clamped to the engine's Fxx range.
+        int bpm = session.project().bpm;
+        int speed = session.project().speed;
+        ImGui::SetNextItemWidth(74.0F);
+        if (ImGui::DragInt("BPM", &bpm, 0.5F, 20, 255, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+            session.set_tempo(bpm, speed);
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(56.0F);
+        if (ImGui::DragInt("SPD", &speed, 0.1F, 1, 31, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+            session.set_tempo(bpm, speed);
+        }
         if (snap.transport_playing) {
             ImGui::SameLine();
             ImGui::TextDisabled("ord %d  pat %d  row %02d", snap.order_pos, snap.pattern_index,

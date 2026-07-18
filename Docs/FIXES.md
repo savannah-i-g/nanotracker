@@ -303,3 +303,43 @@ detail as each fix lands.
   candidate. Dark-theme rendering is pixel-identical (interactive
   alphas and the toward-black scalings became background-relative
   mixes that reduce to the old values on near-black palettes).
+- **IT compressed samples: 2.14 vs 2.15 variant is per-sample, not
+  per-file** (`itImporter.ts` and the first native cut both keyed the
+  IT2.15 double-delta integrator off the file header `cmwt >= 0x0215`,
+  applying one choice to every sample): real files mix the two, and the
+  variant is carried per sample by the cvt "delta" bit (0x04) — exactly
+  as Impulse Tracker and libopenmpt (`ITSample::GetSampleFormat`,
+  `SampleIO::IT214`/`IT215`) decide it. The owner file
+  `02fd_-_lumifluidity.it` (cmwt=0x0215, 35 samples, ~half cvt=0x01)
+  imported as noise on every single-delta slot; forcing double-delta on
+  single-delta data ramps into garbage (first-difference RMS ≈ signal
+  RMS). `io/import/it_importer.cpp` now derives `it215` from each
+  sample's cvt bit. The decompressor itself was already correct
+  (cross-checked bit-exact against libopenmpt's ITDecompression on the
+  real file); only the variant selector was wrong. Covered by
+  `tests/golden/nttest_compressed.it` (8/16-bit × 2.14/2.15, header
+  cmwt=0x0214 so a cmwt-keyed decoder fails the test) and a guarded
+  owner-file harness in `tests/it_import_test.cpp`.
+- **IT dropped samples and their pattern references are reported, not
+  silent** (fix-don't-retain #2 extended): the importer kept the first
+  31 samples and stopped; slots 32+ vanished with no trace. It now
+  tallies every valid sample past the engine's `kMaxSamples` and warns
+  ("samples 32-35 dropped — native slot limit (31)"), and separately
+  warns when pattern cells (directly, or via the instrument→sample
+  remap) still name a dropped slot, so silent notes are explained.
+- **IT uncompressed delta-PCM and stereo handled honestly**
+  (native-only correctness, adjacent to the above): the cvt delta bit
+  on an *uncompressed* sample means delta-PCM — now integrated at the
+  native width instead of read as raw noise. IT stereo is stored split
+  (left channel first, contiguous), not interleaved; the engine's
+  samples are mono, so import keeps the left channel and warns rather
+  than averaging a mis-indexed interleave. No stereo/compressed sample
+  exists in the owner corpus to fixture, so this path is verified by
+  construction and the uncompressed-delta path by the fixture's slot 4.
+- **Live song tempo is editable** (there was no way to change BPM/speed
+  from the UI — the transport only displayed them): the transport bar
+  now hosts BPM (20-255) and SPD (1-31) drag/type fields;
+  `ProjectSession::set_tempo` writes the project set point and, via a
+  new `AudioEngine` `kSetTempo` command, updates the running transport's
+  play state so a mid-playback change is audible from the next tick.
+  Requested by the owner during this fix stage.

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -132,11 +133,45 @@ private:
     int bits_left_ = 0;
 };
 
-// IT 2.14/2.15 sample decompression (itsex.c parity). The accumulators
-// wrap at their native widths; sub-width values sign-extend exactly as
-// the reference's shift trick does.
+// Renders a sorted, ascending slot list as compact ranges: {32,33,34}
+// → "32-34"; {32,34} → "32, 34".
+std::string format_slot_list(const std::vector<int>& slots) {
+    std::string out;
+    std::size_t i = 0;
+    while (i < slots.size()) {
+        std::size_t j = i;
+        while (j + 1 < slots.size() && slots[j + 1] == slots[j] + 1) {
+            ++j;
+        }
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += std::to_string(slots[i]);
+        if (j > i) {
+            out += "-" + std::to_string(slots[j]);
+        }
+        i = j + 1;
+    }
+    return out;
+}
+
+// IT 2.14/2.15 sample decompression (itsex.c parity, cross-checked
+// bit-exact against libopenmpt's ITDecompression on real files).
+//
+// Block structure: a stream of blocks, each a uint16 little-endian byte
+// length followed by an LSB-first bitstream. A block decodes up to
+// 0x8000/elem_size sample points (0x8000 for 8-bit). Widths run 1..9;
+// mode A (<7), B (7-8) and C (9) each carry their own width-change
+// escape. Values accumulate through one integrator (`temp`, the delta)
+// and 2.15 adds a second (`temp2`, the double-delta) — both wrap at the
+// native width, so sub-width values sign-extend via the shift trick.
+//
+// `it215` selects the double-delta integrator and is a PER-SAMPLE input
+// (the caller derives it from the sample's cvt delta bit, not cmwt).
+// `short_read` reports the stream ending before `num_samples` points
+// were produced (the tail is left as silence).
 std::vector<std::int8_t> it_decompress8(const std::uint8_t* src, std::size_t src_size,
-                                        std::size_t num_samples, bool it215) {
+                                        std::size_t num_samples, bool it215, bool& short_read) {
     std::vector<std::int8_t> out(num_samples, 0);
     std::size_t out_pos = 0;
     std::size_t block_pos = 0;
@@ -224,11 +259,12 @@ std::vector<std::int8_t> it_decompress8(const std::uint8_t* src, std::size_t src
             }
         }
     }
+    short_read = out_pos < num_samples;
     return out;
 }
 
 std::vector<std::int16_t> it_decompress16(const std::uint8_t* src, std::size_t src_size,
-                                          std::size_t num_samples, bool it215) {
+                                          std::size_t num_samples, bool it215, bool& short_read) {
     std::vector<std::int16_t> out(num_samples, 0);
     std::size_t out_pos = 0;
     std::size_t block_pos = 0;
@@ -316,6 +352,7 @@ std::vector<std::int16_t> it_decompress16(const std::uint8_t* src, std::size_t s
             }
         }
     }
+    short_read = out_pos < num_samples;
     return out;
 }
 
@@ -340,12 +377,13 @@ std::optional<engine::TrackerProject> import_it(const std::uint8_t* data, std::s
     const int sample_count = rd16(data + 36);
     const int pattern_count = rd16(data + 38);
     const int cwtv = rd16(data + 40);
-    const int cmwt = rd16(data + 42);
     const int flags = rd16(data + 44);
     const bool use_instruments = (flags & 0x04) != 0;
     project.speed = data[50] != 0 ? data[50] : 6;
     project.bpm = data[51] != 0 ? data[51] : 125;
-    const bool it215 = cmwt >= 0x0215;
+    // The 2.14 vs 2.15 (double-delta) sample-decompression variant is a
+    // per-sample property, carried by each sample's cvt "delta" bit —
+    // not the file-wide cmwt. See the sample loop and FIXES.md.
     const bool cwtv_default_signed = cwtv >= 0x0202;
 
     int channels = 0;
@@ -387,9 +425,16 @@ std::optional<engine::TrackerProject> import_it(const std::uint8_t* data, std::s
         pat_offsets.push_back(rd32(data + pat_start + (static_cast<std::size_t>(i) * 4)));
     }
 
-    // Samples.
+    // Samples. IT keeps samples in flat slots; the engine caps at
+    // kMaxSamples, so any valid sample past that is counted and reported
+    // below, never dropped silently. Two per-sample cvt bits steer
+    // decoding: 0x01 = signed PCM; 0x04 = "delta" — which selects the
+    // 2.15 double-delta variant for COMPRESSED samples and delta-PCM
+    // integration for uncompressed ones.
     int decompression_failures = 0;
-    for (std::size_t i = 0; i < sample_offsets.size() && project.samples.size() < 31; ++i) {
+    int stereo_downmixed = 0;
+    std::vector<int> dropped_samples;
+    for (std::size_t i = 0; i < sample_offsets.size(); ++i) {
         const std::size_t base = sample_offsets[i];
         if (base == 0 || base + 80 > size || std::memcmp(data + base, "IMPS", 4) != 0) {
             continue;
@@ -407,6 +452,7 @@ std::optional<engine::TrackerProject> import_it(const std::uint8_t* data, std::s
         const std::string sample_name = read_string(data + base + 20, 26);
         const int convert = data[base + 46];
         const bool is_signed = (convert & 0x01) != 0 || (convert == 0 && cwtv_default_signed);
+        const bool is_delta = (convert & 0x04) != 0;
         const int pan_byte = data[base + 47];
         const int pan = (pan_byte & 0x80) != 0
                             ? static_cast<int>(std::lround((pan_byte & 0x7F) * 255.0 / 64.0))
@@ -420,68 +466,73 @@ std::optional<engine::TrackerProject> import_it(const std::uint8_t* data, std::s
         if (frames == 0 || data_offset == 0 || data_offset >= size) {
             continue;
         }
-        const int chans = is_stereo ? 2 : 1;
-        const std::size_t total_values =
-            static_cast<std::size_t>(frames) * static_cast<std::size_t>(chans);
+        // Valid sample beyond the engine's slot budget: record its
+        // source slot number, skip decoding, report the run below.
+        if (static_cast<int>(project.samples.size()) >= engine::kMaxSamples) {
+            dropped_samples.push_back(static_cast<int>(i) + 1);
+            continue;
+        }
+        if (is_stereo) {
+            ++stereo_downmixed;
+        }
 
         std::vector<float> float_data(frames, 0.0F);
         if (compressed) {
+            // Each channel is an independent block stream (left then
+            // right); we import the leading channel and drop stereo
+            // right. The 2.15 double-delta variant is per-sample.
             const std::size_t avail = size - data_offset;
+            bool short_read = false;
             if (is16) {
-                const auto pcm = it_decompress16(data + data_offset, avail, total_values, it215);
+                const auto pcm =
+                    it_decompress16(data + data_offset, avail, frames, is_delta, short_read);
                 for (std::uint32_t f = 0; f < frames; ++f) {
-                    if (is_stereo) {
-                        const std::size_t at = static_cast<std::size_t>(f) * 2;
-                        float_data[f] =
-                            (static_cast<float>(pcm[at]) + static_cast<float>(pcm[at + 1])) / 2.0F /
-                            32768.0F;
-                    } else {
-                        float_data[f] = static_cast<float>(pcm[f]) / 32768.0F;
-                    }
+                    float_data[f] = static_cast<float>(pcm[f]) / 32768.0F;
                 }
             } else {
-                const auto pcm = it_decompress8(data + data_offset, avail, total_values, it215);
+                const auto pcm =
+                    it_decompress8(data + data_offset, avail, frames, is_delta, short_read);
                 for (std::uint32_t f = 0; f < frames; ++f) {
-                    if (is_stereo) {
-                        const std::size_t at = static_cast<std::size_t>(f) * 2;
-                        float_data[f] =
-                            (static_cast<float>(pcm[at]) + static_cast<float>(pcm[at + 1])) / 2.0F /
-                            128.0F;
-                    } else {
-                        float_data[f] = static_cast<float>(pcm[f]) / 128.0F;
-                    }
+                    float_data[f] = static_cast<float>(pcm[f]) / 128.0F;
                 }
             }
-            // A short decompress leaves trailing silence; the tally
-            // surfaces it (per-block recovery mirroring the web path).
-            if (total_values > 0 && avail < total_values / 8) {
+            if (short_read) {
                 ++decompression_failures;
             }
         } else {
-            const std::size_t bytes_per =
-                static_cast<std::size_t>(is16 ? 2 : 1) * static_cast<std::size_t>(chans);
+            // Uncompressed. IT stores stereo split (left channel first,
+            // contiguous), so the leading run is the channel we keep.
+            // Delta samples integrate a running accumulator that wraps
+            // at the native sample width.
+            const std::size_t bytes_per = is16 ? 2 : 1;
             if (data_offset + (static_cast<std::size_t>(frames) * bytes_per) > size) {
                 continue;
             }
             const std::uint8_t* pcm = data + data_offset;
+            std::int16_t acc16 = 0; // delta integrators; the running value
+            std::int8_t acc8 = 0;   // wraps at the native sample width
             for (std::uint32_t f = 0; f < frames; ++f) {
-                double acc = 0.0;
-                for (int c = 0; c < chans; ++c) {
-                    const std::size_t at =
-                        (static_cast<std::size_t>(f) * static_cast<std::size_t>(chans)) +
-                        static_cast<std::size_t>(c);
-                    if (is16) {
-                        const std::uint16_t raw = rd16(pcm + (at * 2));
+                if (is16) {
+                    const std::uint16_t raw = rd16(pcm + (static_cast<std::size_t>(f) * 2));
+                    if (is_delta) {
+                        acc16 = static_cast<std::int16_t>(static_cast<std::uint16_t>(acc16) + raw);
+                        float_data[f] = static_cast<float>(acc16) / 32768.0F;
+                    } else {
                         const int val = is_signed ? static_cast<std::int16_t>(raw)
                                                   : static_cast<int>(raw) - 32768;
-                        acc += static_cast<double>(val) / 32768.0;
+                        float_data[f] = static_cast<float>(val) / 32768.0F;
+                    }
+                } else {
+                    const std::uint8_t raw = pcm[f];
+                    if (is_delta) {
+                        acc8 = static_cast<std::int8_t>(static_cast<std::uint8_t>(acc8) + raw);
+                        float_data[f] = static_cast<float>(acc8) / 128.0F;
                     } else {
-                        const int val = is_signed ? static_cast<std::int8_t>(pcm[at])
-                                                  : static_cast<int>(pcm[at]) - 128;
-                        acc += static_cast<double>(val) / 128.0;
+                        const int val =
+                            is_signed ? static_cast<std::int8_t>(raw) : static_cast<int>(raw) - 128;
+                        float_data[f] = static_cast<float>(val) / 128.0F;
                     }
                 }
-                float_data[f] = static_cast<float>(acc / chans);
             }
         }
 
@@ -504,8 +555,18 @@ std::optional<engine::TrackerProject> import_it(const std::uint8_t* data, std::s
     }
     if (decompression_failures > 0) {
         results.warnings.emplace_back(std::to_string(decompression_failures) +
-                                      " compressed samples appear truncated (trailing "
-                                      "silence substituted)");
+                                      " compressed sample(s) truncated (data ended early — "
+                                      "trailing silence substituted)");
+    }
+    if (stereo_downmixed > 0) {
+        results.warnings.emplace_back(std::to_string(stereo_downmixed) +
+                                      " stereo sample(s) imported as the left channel (engine "
+                                      "samples are mono)");
+    }
+    if (!dropped_samples.empty()) {
+        results.warnings.emplace_back("samples " + format_slot_list(dropped_samples) +
+                                      " dropped — native slot limit (" +
+                                      std::to_string(engine::kMaxSamples) + ")");
     }
 
     // Instrument keyboard tables → sample slots (instrument mode).
@@ -655,6 +716,28 @@ std::optional<engine::TrackerProject> import_it(const std::uint8_t* data, std::s
                     }
                 }
             }
+        }
+    }
+
+    // Cells that name a dropped sample (directly in sample mode, or via
+    // the instrument→sample remap above) will play silent; surface it
+    // so the drop is not just a sample-strip omission.
+    if (!dropped_samples.empty()) {
+        const std::set<int> dropped_set(dropped_samples.begin(), dropped_samples.end());
+        std::set<int> referenced;
+        for (const auto& pattern : project.patterns) {
+            for (const auto& row : pattern.rows) {
+                for (const auto& cell : row) {
+                    if (cell.instrument > 0 && dropped_set.contains(cell.instrument)) {
+                        referenced.insert(cell.instrument);
+                    }
+                }
+            }
+        }
+        if (!referenced.empty()) {
+            const std::vector<int> refs(referenced.begin(), referenced.end());
+            results.warnings.emplace_back("pattern data references dropped sample(s) " +
+                                          format_slot_list(refs) + " — those notes are silent");
         }
     }
 
