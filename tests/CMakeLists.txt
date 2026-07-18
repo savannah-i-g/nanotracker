@@ -20,11 +20,13 @@ add_executable(nt_tests
     sample_reclaim_test.cpp
     pattern_ops_test.cpp
     sequence_ops_test.cpp
+    convolution_test.cpp
     fx_chain_test.cpp
     graph_test.cpp
     ntp_test.cpp
     povr_session_test.cpp
     clap_host_test.cpp
+    vst3_run_loop_test.cpp
     midi_test.cpp
     midi_record_test.cpp
     ftrk_writer_test.cpp
@@ -39,7 +41,9 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/app/undo.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/audio_device_openal.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/audio_engine.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/convolution_engine.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/decoders.cpp
+    ${CMAKE_SOURCE_DIR}/src/audio/dsp_fft.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/effect_midi.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/fx_chain.cpp
     ${CMAKE_SOURCE_DIR}/src/audio/graph_runner.cpp
@@ -64,7 +68,9 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/engine/tracker_engine.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/clap_host.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/editor_window.cpp
+    ${CMAKE_SOURCE_DIR}/src/ext/vst3_editor_window.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/vst3_host.cpp
+    ${CMAKE_SOURCE_DIR}/src/ext/vst3_run_loop.cpp
     ${CMAKE_SOURCE_DIR}/src/io/ftrk_reader.cpp
     ${CMAKE_SOURCE_DIR}/src/io/ftrk_writer.cpp
     ${CMAKE_SOURCE_DIR}/src/io/sha256.cpp
@@ -83,7 +89,7 @@ target_include_directories(nt_tests PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(nt_tests PRIVATE Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json OpenAL::OpenAL dr_libs stb samplerate
     libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi ixwebsocket
-    vorbisenc vorbis ogg ebur128
+    vorbisenc vorbis ogg ebur128 pffft
     ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
 
 # Real .clap binary for host verification (loaded at runtime by

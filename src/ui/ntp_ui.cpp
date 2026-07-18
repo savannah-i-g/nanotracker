@@ -112,9 +112,19 @@ void NtpUi::draw_param_widget(plugins::NtpInstance& instance, const ntp::ParamDe
     }
 }
 
+void NtpUi::queue_animation(const std::string& workspace_id, const ntp::UiControl& control) {
+    // Activation edge = one trigger per interaction gesture (a drag
+    // retriggering every frame would pin the one-shot on its first
+    // frame). The owning sprite consumes the key when it draws.
+    if (!control.animation.empty() && ImGui::IsItemActivated()) {
+        pending_triggers_.insert(workspace_id + "/" + control.animation);
+    }
+}
+
 // Control trees are recursive by design (loader bounds depth to 4).
 // NOLINTNEXTLINE(misc-no-recursion)
-void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& manifest,
+void NtpUi::draw_control(app::ProjectSession& session, const std::string& workspace_id,
+                         plugins::NtpInstance& instance, const ntp::Manifest& manifest,
                          const plugins::LoadedNtpPlugin& plugin, const ntp::UiControl& control,
                          const Theme& theme) {
     switch (control.type) {
@@ -138,6 +148,7 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
             draw_param_widget(instance, *def, control.type == ntp::ControlType::kKnob,
                               control.width);
         }
+        queue_animation(workspace_id, control);
         break;
     }
     case ntp::ControlType::kToggle: {
@@ -150,6 +161,7 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
             instance.set_param(def->key,
                                on ? static_cast<float>(def->max) : static_cast<float>(def->min));
         }
+        queue_animation(workspace_id, control);
         break;
     }
     case ntp::ControlType::kSelect: {
@@ -166,6 +178,10 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
                 if (ImGui::Selectable(control.options[static_cast<std::size_t>(i)].c_str(),
                                       i == index)) {
                     instance.set_param(def->key, static_cast<float>(i));
+                    // Selects trigger on choice, not on opening the popup.
+                    if (!control.animation.empty()) {
+                        pending_triggers_.insert(workspace_id + "/" + control.animation);
+                    }
                 }
             }
             ImGui::EndCombo();
@@ -204,49 +220,12 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
                                                  : 0.0F;
         draw->AddCircleFilled(ImVec2{origin.x + (tx * width), origin.y + ((1.0F - ty) * height)},
                               4.0F, ImGui::GetColorU32(theme.primary));
+        queue_animation(workspace_id, control);
         break;
     }
-    case ntp::ControlType::kEnvelopeEditor: {
-        // Display of the first envelope node's stages (editing arrives
-        // with a later pass; the shape is the useful feedback).
-        const ntp::DspNode* env = nullptr;
-        for (const ntp::DspNode& node : manifest.graph.nodes) {
-            if (node.type == ntp::NodeType::kEnvelope) {
-                env = &node;
-                break;
-            }
-        }
-        if (env == nullptr) {
-            break;
-        }
-        const float width = control.width > 0.0F ? control.width : 160.0F;
-        const float height = control.height > 0.0F ? control.height : 56.0F;
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImGui::Dummy(ImVec2{width, height});
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        draw->AddRect(origin, ImVec2{origin.x + width, origin.y + height},
-                      ImGui::GetColorU32(ImGuiCol_Border));
-        double total = 0.0;
-        for (const ntp::EnvelopeStage& stage : env->env_stages) {
-            total += std::max(0.001, stage.time);
-        }
-        total += std::max(0.001, env->release);
-        float x = origin.x;
-        float y = origin.y + height;
-        double level = 0.0;
-        for (const ntp::EnvelopeStage& stage : env->env_stages) {
-            const float nx = x + static_cast<float>(std::max(0.001, stage.time) / total) * width;
-            const float ny = origin.y + ((1.0F - static_cast<float>(stage.target)) * height);
-            draw->AddLine(ImVec2{x, y}, ImVec2{nx, ny}, ImGui::GetColorU32(theme.primary), 2.0F);
-            x = nx;
-            y = ny;
-            level = stage.target;
-        }
-        static_cast<void>(level);
-        draw->AddLine(ImVec2{x, y}, ImVec2{origin.x + width, origin.y + height},
-                      ImGui::GetColorU32(theme.primary_dim), 2.0F);
+    case ntp::ControlType::kEnvelopeEditor:
+        draw_envelope_editor(session, workspace_id, manifest, control, theme);
         break;
-    }
     case ntp::ControlType::kMeter: {
         const float peak = instance.node_peak(control.node);
         ImGui::ProgressBar(std::clamp(peak, 0.0F, 1.0F),
@@ -262,13 +241,13 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
             if (control.row_layout && i > 0) {
                 ImGui::SameLine();
             }
-            draw_control(instance, manifest, plugin, control.children[i], theme);
+            draw_control(session, workspace_id, instance, manifest, plugin, control.children[i],
+                         theme);
         }
         ImGui::EndGroup();
         break;
     }
-    case ntp::ControlType::kImage:
-    case ntp::ControlType::kSprite: {
+    case ntp::ControlType::kImage: {
         const Texture& texture = texture_for(plugin, control.asset);
         if (texture.id != 0) {
             const float width =
@@ -279,7 +258,212 @@ void NtpUi::draw_control(plugins::NtpInstance& instance, const ntp::Manifest& ma
         }
         break;
     }
+    case ntp::ControlType::kSprite:
+        draw_sprite(workspace_id, plugin, control);
+        break;
     }
+}
+
+void NtpUi::draw_sprite(const std::string& workspace_id, const plugins::LoadedNtpPlugin& plugin,
+                        const ntp::UiControl& control) {
+    const Texture& texture = texture_for(plugin, control.asset);
+    if (texture.id == 0) {
+        return;
+    }
+    // No frame grid: the whole image is one static frame, exactly the
+    // pre-animation sprite behaviour.
+    if (control.frame_width <= 0 || control.frame_height <= 0) {
+        const float width =
+            control.width > 0.0F ? control.width : static_cast<float>(texture.width);
+        const float height =
+            control.height > 0.0F ? control.height : static_cast<float>(texture.height);
+        ImGui::Image(static_cast<ImTextureID>(texture.id), ImVec2{width, height});
+        return;
+    }
+
+    // Frame selection (web pluginSprite.ts semantics): a triggered
+    // one-shot runs at its fps and wins; otherwise the first loop
+    // animation idles; otherwise frame 0 stands still.
+    const double now = ImGui::GetTime();
+    int frame = 0;
+    if (!control.animations.empty()) {
+        SpriteState& state = sprite_state_[workspace_id + "/" + control.animations[0].name];
+        for (std::size_t a = 0; a < control.animations.size(); ++a) {
+            const auto pending =
+                pending_triggers_.find(workspace_id + "/" + control.animations[a].name);
+            if (pending != pending_triggers_.end()) {
+                pending_triggers_.erase(pending);
+                state.anim = static_cast<int>(a);
+                state.start = now;
+            }
+        }
+        if (state.anim >= 0) {
+            const ntp::SpriteAnimation& anim =
+                control.animations[static_cast<std::size_t>(state.anim)];
+            const auto step = static_cast<std::size_t>((now - state.start) * anim.fps);
+            if (step < anim.frames.size()) {
+                frame = anim.frames[step];
+            } else {
+                state.anim = -1; // one-shot finished — back to idle
+            }
+        }
+        if (state.anim < 0) {
+            for (const ntp::SpriteAnimation& anim : control.animations) {
+                if (anim.loop) {
+                    frame =
+                        anim.frames[static_cast<std::size_t>(now * anim.fps) % anim.frames.size()];
+                    break;
+                }
+            }
+        }
+    }
+
+    // Row-major cell lookup in the sheet (frame indices are validated
+    // against the grid capacity at load).
+    const int cols = std::max(1, texture.width / control.frame_width);
+    const int row = frame / cols; // integer grid coordinates by design
+    const auto cell_x = static_cast<float>((frame % cols) * control.frame_width);
+    const auto cell_y = static_cast<float>(row * control.frame_height);
+    const ImVec2 uv0{cell_x / static_cast<float>(texture.width),
+                     cell_y / static_cast<float>(texture.height)};
+    const ImVec2 uv1{
+        (cell_x + static_cast<float>(control.frame_width)) / static_cast<float>(texture.width),
+        (cell_y + static_cast<float>(control.frame_height)) / static_cast<float>(texture.height)};
+    const float width =
+        control.width > 0.0F ? control.width : static_cast<float>(control.frame_width);
+    const float height =
+        control.height > 0.0F ? control.height : static_cast<float>(control.frame_height);
+    ImGui::Image(static_cast<ImTextureID>(texture.id), ImVec2{width, height}, uv0, uv1);
+}
+
+void NtpUi::draw_envelope_editor(app::ProjectSession& session, const std::string& workspace_id,
+                                 const ntp::Manifest& manifest, const ntp::UiControl& control,
+                                 const Theme& theme) {
+    // The edited node: `node` when it names an envelope, else the
+    // first envelope in the graph. (The web editor moved ADSR *params*
+    // by suffix convention; native edits the stage array itself — the
+    // multi-stage editor the format actually stores.)
+    const ntp::DspNode* env = nullptr;
+    for (const ntp::DspNode& node : manifest.graph.nodes) {
+        if (node.type != ntp::NodeType::kEnvelope) {
+            continue;
+        }
+        if (env == nullptr) {
+            env = &node;
+        }
+        if (!control.node.empty() && node.id == control.node) {
+            env = &node;
+            break;
+        }
+    }
+    if (env == nullptr || env->env_stages.empty()) {
+        return;
+    }
+
+    const float width = control.width > 0.0F ? control.width : 160.0F;
+    const float height = control.height > 0.0F ? control.height : 56.0F;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::PushID(env->id.c_str());
+    ImGui::InvisibleButton("env", ImVec2{width, height});
+
+    // The time axis spans the stages plus the release tail; the point
+    // for stage i sits at its cumulative time. During a drag the axis
+    // freezes at its start-of-drag scale so the point tracks the mouse
+    // instead of rubber-banding as its own time changes.
+    auto axis_total = [env](const std::vector<ntp::EnvelopeStage>& stages) {
+        double total = 0.0;
+        for (const ntp::EnvelopeStage& stage : stages) {
+            total += std::max(0.001, stage.time);
+        }
+        return total + std::max(0.001, env->release);
+    };
+    auto stage_point = [&](const std::vector<ntp::EnvelopeStage>& stages, int index, double total) {
+        double at = 0.0;
+        for (int i = 0; i <= index; ++i) {
+            at += std::max(0.001, stages[static_cast<std::size_t>(i)].time);
+        }
+        const auto level = static_cast<float>(stages[static_cast<std::size_t>(index)].target);
+        return ImVec2{
+            std::min(origin.x + (static_cast<float>(at / total) * width), origin.x + width),
+            origin.y + ((1.0F - level) * height)};
+    };
+
+    const std::string drag_key = workspace_id + "/" + env->id;
+    bool dragging = env_drag_.stage >= 0 && env_drag_.key == drag_key;
+
+    // Drag lifecycle before drawing so the curve reflects this frame.
+    if (!dragging && ImGui::IsItemActivated()) {
+        const double total = axis_total(env->env_stages);
+        const ImVec2 mouse = ImGui::GetMousePos();
+        int best = -1;
+        float best_d2 = 10.0F * 10.0F; // grab radius, squared
+        for (int i = 0; i < static_cast<int>(env->env_stages.size()); ++i) {
+            const ImVec2 point = stage_point(env->env_stages, i, total);
+            const float dx = mouse.x - point.x;
+            const float dy = mouse.y - point.y;
+            const float d2 = (dx * dx) + (dy * dy);
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best = i;
+            }
+        }
+        if (best >= 0) {
+            env_drag_ = {
+                .key = drag_key, .stage = best, .total = total, .preview = env->env_stages};
+            dragging = true;
+        }
+    }
+    if (dragging && ImGui::IsItemActive()) {
+        const ImVec2 mouse = ImGui::GetMousePos();
+        ntp::EnvelopeStage& stage = env_drag_.preview[static_cast<std::size_t>(env_drag_.stage)];
+        stage.target = 1.0F - std::clamp((mouse.y - origin.y) / height, 0.0F, 1.0F);
+        double prior = 0.0;
+        for (int i = 0; i < env_drag_.stage; ++i) {
+            prior += std::max(0.001, env_drag_.preview[static_cast<std::size_t>(i)].time);
+        }
+        const double at =
+            static_cast<double>(std::clamp((mouse.x - origin.x) / width, 0.0F, 1.0F)) *
+            env_drag_.total;
+        stage.time = std::max(0.001, at - prior);
+    }
+    if (dragging && ImGui::IsItemDeactivated()) {
+        // The one republish of the drag (structural — the session
+        // stops the transport and republishes the bundle).
+        const ntp::EnvelopeStage& stage =
+            env_drag_.preview[static_cast<std::size_t>(env_drag_.stage)];
+        session.set_plugin_env_stage(workspace_id, env->id, env_drag_.stage, stage.target,
+                                     stage.time);
+        env_drag_ = {};
+        dragging = false;
+    }
+
+    // Curve + draggable points, from the preview while dragging and
+    // the live stages otherwise.
+    const std::vector<ntp::EnvelopeStage>& stages = dragging ? env_drag_.preview : env->env_stages;
+    const double total = dragging ? env_drag_.total : axis_total(stages);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRect(origin, ImVec2{origin.x + width, origin.y + height},
+                  ImGui::GetColorU32(ImGuiCol_Border));
+    ImVec2 from{origin.x, origin.y + height};
+    for (int i = 0; i < static_cast<int>(stages.size()); ++i) {
+        const ImVec2 to = stage_point(stages, i, total);
+        draw->AddLine(from, to, ImGui::GetColorU32(theme.primary), 2.0F);
+        from = to;
+    }
+    draw->AddLine(from, ImVec2{origin.x + width, origin.y + height},
+                  ImGui::GetColorU32(theme.primary_dim), 2.0F);
+    for (int i = 0; i < static_cast<int>(stages.size()); ++i) {
+        const bool held = dragging && i == env_drag_.stage;
+        draw->AddCircleFilled(stage_point(stages, i, total), held ? 4.5F : 3.0F,
+                              ImGui::GetColorU32(held ? theme.text : theme.primary));
+    }
+    if (ImGui::IsItemHovered() || dragging) {
+        const ntp::EnvelopeStage& stage =
+            stages[static_cast<std::size_t>(dragging ? env_drag_.stage : 0)];
+        ImGui::SetTooltip("%s%.0f ms -> %.2f", dragging ? "" : "drag points | ",
+                          stage.time * 1000.0, stage.target);
+    }
+    ImGui::PopID();
 }
 
 void NtpUi::draw_auto_panel(plugins::NtpInstance& instance, const ntp::Manifest& manifest) {
@@ -439,7 +623,7 @@ void NtpUi::draw(app::ProjectSession& session, const std::string& workspace_id,
         return;
     }
     for (const ntp::UiControl& control : manifest.ui.controls) {
-        draw_control(*instance, manifest, *plugin, control, theme);
+        draw_control(session, workspace_id, *instance, manifest, *plugin, control, theme);
     }
     draw_slot_picker(session, workspace_id, *instance, theme);
 }

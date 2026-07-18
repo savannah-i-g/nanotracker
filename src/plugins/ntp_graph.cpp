@@ -146,7 +146,7 @@ NodeRuntime::NodeRuntime(const ntp::DspNode& def, const LoadedNtpPlugin& plugin,
         const auto it = plugin.samples.find(def.impulse);
         if (it != plugin.samples.end()) {
             const audio::SampleBuffer& ir = *it->second;
-            const std::uint32_t taps = std::min(ir.frames, kMaxImpulseFrames);
+            const std::uint32_t taps = ir.frames; // loader guards the length
             ir_l_.resize(taps);
             ir_r_.resize(taps);
             for (std::uint32_t i = 0; i < taps; ++i) {
@@ -166,8 +166,20 @@ NodeRuntime::NodeRuntime(const ntp::DspNode& def, const LoadedNtpPlugin& plugin,
                     ir_r_[i] *= scale;
                 }
             }
-            history_l_.assign(taps, 0.0F);
-            history_r_.assign(taps, 0.0F);
+            if (taps > kConvolverDirectFirMaxFrames) {
+                // Long impulse: partitioned-FFT path. The engines keep
+                // the impulse as spectra, so the tap vectors are
+                // released — process() dispatches on engine readiness.
+                conv_engine_l_.prepare(ir_l_, kNtpBlockFrames);
+                conv_engine_r_.prepare(ir_r_, kNtpBlockFrames);
+                ir_l_ = {};
+                ir_r_ = {};
+                conv_in_.assign(kNtpBlockFrames, 0.0F);
+                conv_out_.assign(kNtpBlockFrames, 0.0F);
+            } else {
+                history_l_.assign(taps, 0.0F);
+                history_r_.assign(taps, 0.0F);
+            }
         }
         break;
     }
@@ -958,6 +970,26 @@ void NodeRuntime::process(const float* in, float* out, std::uint32_t frames,
         process_wavetable(out, frames);
         break;
     case ntp::NodeType::kConvolver: {
+        if (conv_engine_l_.ready()) {
+            // Partitioned-FFT path: one mono engine per channel over
+            // deinterleaved copies of the block (frames <= the engines'
+            // 128-frame partition, so each call is one FFT round trip).
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                conv_in_[i] = in[static_cast<std::size_t>(i) * 2];
+            }
+            conv_engine_l_.process(conv_in_.data(), conv_out_.data(), frames);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                out[static_cast<std::size_t>(i) * 2] = conv_out_[i];
+            }
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                conv_in_[i] = in[(static_cast<std::size_t>(i) * 2) + 1];
+            }
+            conv_engine_r_.process(conv_in_.data(), conv_out_.data(), frames);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                out[(static_cast<std::size_t>(i) * 2) + 1] = conv_out_[i];
+            }
+            break;
+        }
         const std::size_t taps = ir_l_.size();
         if (taps == 0) {
             std::copy_n(in, static_cast<std::size_t>(frames) * 2, out);

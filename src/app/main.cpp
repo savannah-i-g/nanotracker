@@ -73,6 +73,7 @@ struct CliOptions {
     bool clap_editor = false;          // also open the plugin's editor window
     const char* vst3_path = nullptr;   // .vst3 module to load at startup
     bool vst3_demo = false;            // spawn its first class + hold a note
+    bool vst3_editor = false;          // also open the plugin's editor window
     bool seq_demo = false;             // add piano-roll notes to the loaded project
     const char* save_path = nullptr;   // write the project as .ftrk and continue
     const char* export_path = nullptr; // offline render (.wav/.ogg/.mp3) and exit
@@ -119,6 +120,8 @@ CliOptions parse_cli(int argc, char** argv) {
             options.vst3_path = argv[++i];
         } else if (std::strcmp(argv[i], "--vst3-demo") == 0) {
             options.vst3_demo = true;
+        } else if (std::strcmp(argv[i], "--vst3-editor") == 0) {
+            options.vst3_editor = true;
         } else if (std::strcmp(argv[i], "--seq-demo") == 0) {
             options.seq_demo = true;
         } else if (std::strcmp(argv[i], "--save") == 0 && i + 1 < argc) {
@@ -591,6 +594,9 @@ int main(int argc, char** argv) {
                     entry.workspace_id = node_id;
                     session.set_instrument_entry(1, entry);
                     session.preview_plugin_note(1, 69, 1.0F);
+                    if (cli.vst3_editor && !session.open_vst3_editor(node_id)) {
+                        std::fprintf(stderr, "vst3 editor: %s\n", session.error().c_str());
+                    }
                 }
             }
         }
@@ -738,6 +744,7 @@ int main(int argc, char** argv) {
             nt::ui::LocalApiView::draw(local_api, settings, *theme);
             export_view.draw(session, *theme, shell.show_export);
             session.update_clap_editors();
+            session.update_vst3_editors();
             session.sweep_retired();
             nt::platform::ImGuiHost::end_frame();
 

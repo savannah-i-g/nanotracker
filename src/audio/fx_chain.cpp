@@ -50,11 +50,15 @@ constexpr std::array<FxParamDef, 7> kChorusParams = {{
     {"dry", "DRY", 0, 100, 100, 1},
     {"mode", "MODE", 0, 1, 0, 1},
 }};
-constexpr std::array<FxParamDef, 4> kReverbParams = {{
+// mode appends to the web schema (0 = comb/Freeverb, 1 = convolution
+// — fx_chain.h header note); appending keeps the first four indices
+// identical to projects saved before the parameter existed.
+constexpr std::array<FxParamDef, 5> kReverbParams = {{
     {"wet", "WET", 0, 100, 30, 1},
     {"dry", "DRY", 0, 100, 100, 1},
     {"decay", "DECAY", 0.1F, 8, 2.0F, 0.1F},
     {"preDelay", "PRE-DELAY", 0, 100, 0, 1},
+    {"mode", "MODE", 0, 1, 0, 1},
 }};
 constexpr std::array<FxParamDef, 2> kWidthParams = {{
     {"width", "WIDTH", 0, 200, 100, 1},
@@ -103,6 +107,59 @@ float sigmoid_shape(float x, float drive) {
 constexpr std::array<int, 8> kCombTunings = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
 constexpr std::array<int, 4> kAllpassTunings = {556, 441, 341, 225};
 
+// Deterministic xorshift for the synthetic reverb impulse — a fixed
+// seed makes every rebuild of the same decay/preDelay bit-identical.
+inline std::uint32_t next_rng(std::uint32_t& state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+inline float rng_bipolar(std::uint32_t& state) {
+    return (static_cast<float>(next_rng(state) & 0xFFFFFF) / static_cast<float>(0x800000)) - 1.0F;
+}
+
+// The web's synthetic reverb impulse (lib/reverbIR.ts buildReverbIR):
+// preDelay of leading silence (clamped to 100 ms), then min(8, decay)
+// seconds of white noise under an exp(-3 t / decay) envelope; the
+// right channel is an independent noise stream at 0.97 gain for
+// stereo decorrelation. Two deliberate deviations: the noise source
+// is fixed-seed (the web used Math.random(); native determinism
+// doctrine, Docs/FIXES.md), and the pair is normalised to unit energy
+// — WebAudio's ConvolverNode.normalize did equivalent loudness
+// calibration implicitly, so without this the wet level would scale
+// with decay.
+void build_reverb_impulse(std::uint32_t rate, float decay_s, float predelay_ms,
+                          std::vector<float>& left, std::vector<float>& right) {
+    const float pre_s = std::clamp(predelay_ms / 1000.0F, 0.0F, 0.1F);
+    const auto pre = static_cast<std::uint32_t>(std::lround(pre_s * static_cast<float>(rate)));
+    const auto tail =
+        std::max<std::uint32_t>(1, static_cast<std::uint32_t>(std::lround(
+                                       std::min(8.0F, decay_s) * static_cast<float>(rate))));
+    left.assign(static_cast<std::size_t>(pre) + tail, 0.0F);
+    right.assign(static_cast<std::size_t>(pre) + tail, 0.0F);
+    std::uint32_t rng_l = 0x2545F491U;
+    std::uint32_t rng_r = 0x9E3779B9U;
+    const auto rate_f = static_cast<float>(rate);
+    for (std::uint32_t i = 0; i < tail; ++i) {
+        const float t = static_cast<float>(i) / rate_f;
+        const float envelope = std::exp(-3.0F * t / std::max(0.001F, decay_s));
+        left[pre + i] = rng_bipolar(rng_l) * envelope;
+        right[pre + i] = rng_bipolar(rng_r) * envelope * 0.97F;
+    }
+    double energy = 0.0;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        energy +=
+            (static_cast<double>(left[i]) * left[i]) + (static_cast<double>(right[i]) * right[i]);
+    }
+    const float scale = energy > 0.0 ? static_cast<float>(1.0 / std::sqrt(energy)) : 1.0F;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        left[i] *= scale;
+        right[i] *= scale;
+    }
+}
+
 } // namespace
 
 std::span<const FxModuleDef> fx_module_registry() {
@@ -149,6 +206,18 @@ FxModuleRuntime::FxModuleRuntime(const FxModuleDef& def, const engine::FxModuleI
         }
         delay_l_.configure(rate / 8); // pre-delay
         delay_r_.configure(rate / 8);
+        if (params_[4] >= 0.5F) {
+            // Convolution mode: synthesise the impulse from the decay/
+            // preDelay this runtime was built with (this constructor
+            // runs off the audio thread at rack build — the only place
+            // those parameters can take effect; fx_chain.h header).
+            std::vector<float> impulse_l;
+            std::vector<float> impulse_r;
+            build_reverb_impulse(rate, params_[2], params_[3], impulse_l, impulse_r);
+            conv_l_.prepare(impulse_l, kFxBlockFrames);
+            conv_r_.prepare(impulse_r, kFxBlockFrames);
+            conv_scratch_.assign(kFxBlockFrames, 0.0F);
+        }
     }
     crush_l_.configure(rate);
     crush_r_.configure(rate);
@@ -178,6 +247,11 @@ void FxModuleRuntime::refresh() {
         break;
     case Kind::kReverb: {
         // Map decay seconds → comb feedback (Freeverb roomsize feel).
+        // Convolution mode reads none of this: its impulse is baked at
+        // construction, and refresh() may run on the audio thread
+        // (kFxParam / automation), which must never rebuild it. A
+        // decay write here still lands in params_ so a later rack
+        // republish builds the right impulse.
         const float decay = std::clamp(params_[2], 0.1F, 8.0F);
         const float feedback = std::clamp(0.7F + (decay / 8.0F) * 0.28F, 0.7F, 0.98F);
         for (auto& c : combs_l_) {
@@ -294,6 +368,25 @@ void FxModuleRuntime::process(float* left, float* right, std::uint32_t frames) {
         break;
     }
     case Kind::kReverb: {
+        if (params_[4] >= 0.5F && conv_l_.ready()) {
+            // Convolution mode. The impulse is unit-energy and carries
+            // the pre-delay as leading silence, so this is a plain
+            // wet/dry mix around the engine pair — no Freeverb wet
+            // scale. Falls through to the comb bank when the engines
+            // were not built (mode flipped at audio rate — see
+            // refresh()); the combs are always configured.
+            const float conv_wet = params_[0] / 100.0F;
+            const float conv_dry = params_[1] / 100.0F;
+            conv_l_.process(left, conv_scratch_.data(), frames);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                left[i] = (left[i] * conv_dry) + (conv_scratch_[i] * conv_wet);
+            }
+            conv_r_.process(right, conv_scratch_.data(), frames);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                right[i] = (right[i] * conv_dry) + (conv_scratch_[i] * conv_wet);
+            }
+            break;
+        }
         const float wet = (params_[0] / 100.0F) * 0.3F; // Freeverb wet scale
         const float dry = params_[1] / 100.0F;
         const float predelay_frames = (params_[3] / 1000.0F) * static_cast<float>(rate_);

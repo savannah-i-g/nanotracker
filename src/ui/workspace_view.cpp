@@ -200,6 +200,14 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
                     ImGui::TextDisabled("showing %d of %d parameters", shown,
                                         static_cast<int>(vst3->params().size()));
                 }
+                if (session.vst3_editor_open(node.workspace_id)) {
+                    ImGui::TextDisabled("editor open");
+                } else if (ImGui::SmallButton("open editor")) {
+                    if (!session.open_vst3_editor(node.workspace_id)) {
+                        status_ = session.error();
+                        status_ttl_ = 6.0F;
+                    }
+                }
             } else {
                 plugin_ui_.draw(session, node.workspace_id, theme);
             }

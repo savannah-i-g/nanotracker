@@ -3,7 +3,9 @@
 // instance processing — a playable synth voice (oscillator + envelope
 // via audio-rate param connection + pitch mod route), an FX delay
 // graph, sampler zone/round-robin behaviour, user-assignable slot
-// overrides, and slice-map chopping (Stage 19).
+// overrides, slice-map chopping (Stage 19), and the Stage 20 driver
+// features (sprite animation validation, envelope stage writes).
+#include "app/project_session.h"
 #include "plugins/ntp_loader.h"
 #include "plugins/ntp_voices.h"
 #include "rt/rt_assert.h"
@@ -13,6 +15,8 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <miniz.h>
 #include <string>
 #include <vector>
@@ -602,4 +606,332 @@ TEST_CASE("slice choke groups cut and round-robin groups rotate", "[ntp]") {
     const std::vector<float> second = render_blocks(instance, 18);
     CHECK(goertzel(first, kRate, 500.0F) > goertzel(first, kRate, 900.0F) * 3.0F);
     CHECK(goertzel(second, kRate, 900.0F) > goertzel(second, kRate, 500.0F) * 3.0F);
+}
+
+// ── Stage 20: convolver uncap ────────────────────────────────────────
+
+TEST_CASE("convolver renders impulses beyond the old 2048-tap cap", "[ntp]") {
+    // 0.15 s of 500 Hz as the impulse: 7200 taps — 3.5x the removed
+    // kMaxImpulseFrames cap. A click must play the whole impulse back,
+    // so energy far past frame 2048 (where the truncated FIR fell
+    // silent) proves the uncap, and the 500 Hz line is the tilt check.
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.conv", "name": "TEST CONV", "type": "fx",
+      "graph": {
+        "nodes": [{"id": "c", "type": "convolver", "impulse": "ir.wav"}],
+        "connections": [
+          {"from": "input", "to": "c"},
+          {"from": "c", "to": "output"}
+        ]
+      }
+    })";
+    const std::vector<std::uint8_t> zip = make_zip({
+        {"plugin.json", to_bytes(manifest_json)},
+        {"ir.wav", make_wav(500.0F, 0.15F, kRate)},
+    });
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+
+    nt::plugins::NtpInstance instance(*plugin, kRate);
+    std::array<float, 256> in{};
+    std::array<float, 256> out{};
+    in[0] = 1.0F;
+    in[1] = 1.0F;
+    std::vector<float> mono;
+    for (int b = 0; b < 60; ++b) { // 7680 frames > the 7200-tap tail
+        {
+            [[maybe_unused]] const nt::rt::RtScope rt_scope;
+            instance.process(in.data(), out.data(), 128);
+        }
+        for (int i = 0; i < 128; ++i) {
+            mono.push_back(out[static_cast<std::size_t>(i) * 2]);
+        }
+        in[0] = 0.0F;
+        in[1] = 0.0F;
+    }
+
+    // Expected spectral tilt over the whole response.
+    CHECK(goertzel(mono, kRate, 500.0F) > goertzel(mono, kRate, 900.0F) * 5.0F);
+    // Non-silence well past the old cap (frames 4096..7168).
+    const std::vector<float> tail(mono.begin() + 4096, mono.begin() + 7168);
+    CHECK(goertzel(tail, kRate, 500.0F) > 0.005F);
+    CHECK(goertzel(tail, kRate, 500.0F) > goertzel(tail, kRate, 900.0F) * 5.0F);
+    // The impulse does end: silence after 7200 frames.
+    float end_peak = 0.0F;
+    for (std::size_t i = 7400; i < mono.size(); ++i) {
+        end_peak = std::max(end_peak, std::abs(mono[i]));
+    }
+    CHECK(end_peak < 1e-4F);
+}
+
+// ── Stage 20: sprite animations + envelope stage editing ─────────────
+
+namespace {
+
+// RGBA sprite sheet as a real PNG (miniz's tdefl writer): each 4x4
+// cell filled with a distinct colour so frames are distinguishable.
+std::vector<std::uint8_t> make_sheet_png(int width, int height) {
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) *
+                                   static_cast<std::size_t>(height) * 4);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t at =
+                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) +
+                 static_cast<std::size_t>(x)) *
+                4;
+            const int cell = (x / 4) + ((y / 4) * (width / 4));
+            rgba[at] = static_cast<std::uint8_t>(40 * (cell + 1));
+            rgba[at + 1] = static_cast<std::uint8_t>(255 - (40 * cell));
+            rgba[at + 2] = 128;
+            rgba[at + 3] = 255;
+        }
+    }
+    std::size_t png_size = 0;
+    void* png = tdefl_write_image_to_png_file_in_memory(rgba.data(), width, height, 4, &png_size);
+    REQUIRE(png != nullptr);
+    std::vector<std::uint8_t> bytes(static_cast<std::uint8_t*>(png),
+                                    static_cast<std::uint8_t*>(png) + png_size);
+    mz_free(png);
+    return bytes;
+}
+
+// Instrument with a voice envelope driving an amp — the envelope
+// editor's write target.
+std::vector<std::uint8_t> make_env_synth_zip() {
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.envsynth", "name": "ENV SYNTH", "type": "instrument",
+      "voices": 4,
+      "graph": {
+        "nodes": [
+          {"id": "osc", "type": "oscillator", "scope": "voice",
+           "oscType": "sine", "frequency": 0, "gain": 0.5},
+          {"id": "env", "type": "envelope", "scope": "voice", "release": 0.05,
+           "envStages": [{"target": 1, "time": 0.002}, {"target": 0.6, "time": 0.05}]},
+          {"id": "amp", "type": "gain", "scope": "voice", "gain": 0}
+        ],
+        "connections": [
+          {"from": "osc", "to": "amp"},
+          {"from": "env", "to": "amp", "toParam": "gain"},
+          {"from": "amp", "to": "voiceOut"}
+        ],
+        "modRoutes": [
+          {"source": "pitch", "targets": [{"target": "osc.frequency", "depth": 1}]}
+        ]
+      },
+      "ui": {"controls": [{"type": "envelope_editor", "node": "env"}]}
+    })";
+    return make_zip({{"plugin.json", to_bytes(manifest_json)}});
+}
+
+std::filesystem::path write_temp_file(const char* name, const std::vector<std::uint8_t>& bytes) {
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / name;
+    std::ofstream file(path, std::ios::binary);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) — byte/file seam
+    file.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    return path;
+}
+
+} // namespace
+
+TEST_CASE("sprite animations load with frame lists, fps default and interaction keys", "[ntp]") {
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.sprite", "name": "SPRITE FX", "type": "fx",
+      "params": [{"key": "g", "label": "G", "min": 0, "max": 1, "default": 0.5}],
+      "graph": {
+        "nodes": [{"id": "amp", "type": "gain"}],
+        "connections": [
+          {"from": "input", "to": "amp"},
+          {"from": "amp", "to": "output"}
+        ]
+      },
+      "ui": {"controls": [
+        {"type": "sprite", "asset": "sheet.png", "frameW": 4, "frameH": 4,
+         "animations": [
+           {"name": "idle", "frames": [0, 1], "loop": true},
+           {"name": "hit", "frames": [1, 0, 1], "fps": 24}
+         ]},
+        {"type": "knob", "parameter": "g", "animation": "hit"}
+      ]}
+    })";
+    const std::vector<std::uint8_t> zip = make_zip({
+        {"plugin.json", to_bytes(manifest_json)},
+        {"sheet.png", make_sheet_png(8, 4)}, // 2 cells of 4x4
+    });
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+
+    REQUIRE(plugin->manifest.ui.controls.size() == 2);
+    const ntp::UiControl& sprite = plugin->manifest.ui.controls[0];
+    CHECK(sprite.frame_width == 4);
+    CHECK(sprite.frame_height == 4);
+    REQUIRE(sprite.animations.size() == 2);
+    CHECK(sprite.animations[0].name == "idle");
+    CHECK(sprite.animations[0].frames == std::vector<int>({0, 1}));
+    CHECK(sprite.animations[0].fps == 10.0); // web DEFAULT_SPRITE_FPS
+    CHECK(sprite.animations[0].loop);
+    CHECK(sprite.animations[1].name == "hit");
+    CHECK(sprite.animations[1].fps == 24.0);
+    CHECK_FALSE(sprite.animations[1].loop);
+    CHECK(plugin->manifest.ui.controls[1].animation == "hit");
+    // The sheet decoded: two distinguishable 4x4 frames.
+    REQUIRE(plugin->images.contains("sheet.png"));
+    const auto& image = plugin->images.at("sheet.png");
+    CHECK(image.width == 8);
+    CHECK(image.height == 4);
+    CHECK(image.rgba[0] != image.rgba[4LL * 4]); // frame 0 vs frame 1 texel
+}
+
+TEST_CASE("sprite animation validation failures are collected, not thrown", "[ntp]") {
+    SECTION("shape errors at manifest level") {
+        const std::string bad = R"({
+          "ntp": 1, "id": "test.badsprite", "name": "BAD", "type": "fx",
+          "params": [{"key": "g", "label": "G", "min": 0, "max": 1, "default": 0}],
+          "graph": {"nodes": [{"id": "amp", "type": "gain"}],
+                    "connections": [{"from": "input", "to": "amp"},
+                                    {"from": "amp", "to": "output"}]},
+          "ui": {"controls": [
+            {"type": "sprite", "asset": "a.png",
+             "animations": [
+               {"frames": [0]},
+               {"name": "dup", "frames": []},
+               {"name": "dup", "frames": [-1], "fps": 0}
+             ]},
+            {"type": "knob", "parameter": "g", "animation": "ghost"},
+            {"type": "label", "label": "L", "animations": []}
+          ]}
+        })";
+        ntp::Manifest manifest;
+        std::vector<std::string> errors;
+        CHECK_FALSE(nt::plugins::parse_ntp_manifest(bad, manifest, errors));
+        const std::string all = errors_joined(errors);
+        CHECK(all.find("sprite animation without a name") != std::string::npos);
+        CHECK(all.find("needs a non-empty frames[]") != std::string::npos);
+        CHECK(all.find("negative frame index") != std::string::npos);
+        CHECK(all.find("needs fps > 0") != std::string::npos);
+        CHECK(all.find("duplicate sprite animation name \"dup\"") != std::string::npos);
+        CHECK(all.find("unknown animation \"ghost\"") != std::string::npos);
+        CHECK(all.find("only valid on sprite controls") != std::string::npos);
+        CHECK(all.find("no frameW/frameH grid") != std::string::npos);
+    }
+
+    SECTION("frame indices bound to the decoded sheet grid") {
+        const std::string manifest_json = R"({
+          "ntp": 1, "id": "test.overrun", "name": "OVERRUN", "type": "fx",
+          "graph": {"nodes": [{"id": "amp", "type": "gain"}],
+                    "connections": [{"from": "input", "to": "amp"},
+                                    {"from": "amp", "to": "output"}]},
+          "ui": {"controls": [
+            {"type": "sprite", "asset": "sheet.png", "frameW": 4, "frameH": 4,
+             "animations": [{"name": "spin", "frames": [0, 5], "loop": true}]}
+          ]}
+        })";
+        const std::vector<std::uint8_t> zip = make_zip({
+            {"plugin.json", to_bytes(manifest_json)},
+            {"sheet.png", make_sheet_png(8, 4)}, // capacity 2: frames 0..1
+        });
+        std::vector<std::string> errors;
+        auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+        CHECK(plugin == nullptr);
+        CHECK(errors_joined(errors).find("frame 5 outside the 2-frame sheet") != std::string::npos);
+    }
+}
+
+TEST_CASE("envelope stage writes clamp and reshape the attack", "[ntp]") {
+    const std::vector<std::uint8_t> zip = make_env_synth_zip();
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    INFO(errors_joined(errors));
+    REQUIRE(plugin != nullptr);
+
+    // ~21 ms of held note; the first-stage attack time decides how
+    // much level accumulates inside the window.
+    auto render_peak = [](nt::plugins::NtpInstance& instance) {
+        std::array<float, 256> block{};
+        float peak = 0.0F;
+        instance.note_on(69, 1.0F);
+        for (int b = 0; b < 8; ++b) {
+            instance.process(nullptr, block.data(), 128);
+            for (const float v : block) {
+                peak = std::max(peak, std::abs(v));
+            }
+        }
+        return peak;
+    };
+
+    float fast_peak = 0.0F;
+    {
+        nt::plugins::NtpInstance instance(*plugin, kRate);
+        // Out-of-range writes clamp: target 0..1, time >= 1 ms.
+        CHECK(instance.set_env_stage("env", 0, 3.0, 0.0));
+        // Unknown node / non-envelope node / bad index are refused.
+        CHECK_FALSE(instance.set_env_stage("ghost", 0, 0.5, 0.1));
+        CHECK_FALSE(instance.set_env_stage("amp", 0, 0.5, 0.1));
+        CHECK_FALSE(instance.set_env_stage("env", 2, 0.5, 0.1));
+        CHECK_FALSE(instance.set_env_stage("env", -1, 0.5, 0.1));
+        const ntp::DspNode& env = plugin->manifest.graph.nodes[1];
+        CHECK(env.env_stages[0].target == 1.0);
+        CHECK(env.env_stages[0].time == 0.001);
+        fast_peak = render_peak(instance);
+    }
+
+    float slow_peak = 0.0F;
+    {
+        nt::plugins::NtpInstance instance(*plugin, kRate);
+        CHECK(instance.set_env_stage("env", 0, 1.0, 0.2)); // 200 ms attack
+        CHECK(plugin->manifest.graph.nodes[1].env_stages[0].time == 0.2);
+        slow_peak = render_peak(instance);
+    }
+
+    // 1 ms attack reaches full level inside the window; 200 ms barely
+    // starts.
+    CHECK(fast_peak > 0.4F);
+    CHECK(slow_peak < fast_peak * 0.5F);
+}
+
+TEST_CASE("session envelope commit routes through the structural republish", "[ntp]") {
+    const auto path = write_temp_file("nt_env_edit.ntins", make_env_synth_zip());
+    nt::audio::AudioEngine audio; // not started — device-independent
+    nt::app::ProjectSession session(audio);
+    REQUIRE(session.load_plugin_file(path) == "test.envsynth");
+    const std::string node_id = session.add_plugin_node("test.envsynth");
+    REQUIRE_FALSE(node_id.empty());
+
+    // The exact commit path the envelope editor's drag release takes.
+    REQUIRE(session.set_plugin_env_stage(node_id, "env", 1, 1.4, 0.0002));
+    const nt::plugins::NtpInstance* instance = session.plugin_instance(node_id);
+    REQUIRE(instance != nullptr);
+    const ntp::DspNode& env = instance->manifest().graph.nodes[1];
+    CHECK(env.env_stages[1].target == 1.0); // clamped from 1.4
+    CHECK(env.env_stages[1].time == 0.001); // clamped from 0.2 ms
+    CHECK(env.env_stages[0].time == 0.002); // untouched neighbour
+
+    CHECK_FALSE(session.set_plugin_env_stage(node_id, "ghost", 0, 0.5, 0.1));
+    CHECK_FALSE(session.set_plugin_env_stage("no-such-node", "env", 0, 0.5, 0.1));
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("convolver refuses impulses beyond the 10 s memory guard", "[ntp]") {
+    const std::string manifest_json = R"({
+      "ntp": 1, "id": "test.convbig", "name": "TOO BIG", "type": "fx",
+      "graph": {
+        "nodes": [{"id": "c", "type": "convolver", "impulse": "ir.wav"}],
+        "connections": [
+          {"from": "input", "to": "c"},
+          {"from": "c", "to": "output"}
+        ]
+      }
+    })";
+    const std::vector<std::uint8_t> zip = make_zip({
+        {"plugin.json", to_bytes(manifest_json)},
+        {"ir.wav", make_wav(500.0F, 10.5F, kRate)},
+    });
+    std::vector<std::string> errors;
+    auto plugin = nt::plugins::load_ntp_archive(zip.data(), zip.size(), kRate, errors);
+    CHECK(plugin == nullptr);
+    CHECK(errors_joined(errors).find("longer than 10 s") != std::string::npos);
 }

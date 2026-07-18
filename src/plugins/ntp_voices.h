@@ -50,7 +50,10 @@ struct SlotOverride {
 
 class NtpInstance final : public audio::GraphPluginBinding {
 public:
-    NtpInstance(const LoadedNtpPlugin& plugin, std::uint32_t rate);
+    // Non-const plugin: set_env_stage writes the manifest's envelope
+    // stage arrays in place (the one sanctioned mutation — everything
+    // else reads).
+    NtpInstance(LoadedNtpPlugin& plugin, std::uint32_t rate);
 
     NtpInstance(const NtpInstance&) = delete;
     NtpInstance& operator=(const NtpInstance&) = delete;
@@ -102,6 +105,16 @@ public:
 
     // Peak of a node's last output block (meter controls).
     [[nodiscard]] float node_peak(const std::string& node_id) const;
+
+    // Writes one envelope stage point on the owning plugin's manifest
+    // node (the envelope-editor commit). Clamps to target 0..1 and
+    // time ≥ 1 ms. Only inside the session's structural stop→publish
+    // window: NodeRuntimes — across every instance of this plugin id,
+    // the manifest is shared — read the stage array in place, so the
+    // caller must fence the write exactly like a sequence-note edit
+    // (ProjectSession::set_plugin_env_stage). Returns false when the
+    // node is not an envelope or the stage index is out of range.
+    bool set_env_stage(const std::string& node_id, int stage_index, double target, double time);
 
     // ── User sample slots (session thread) ───────────────────────────
     // Installs/clears an override for `slot_id` across every sampler
@@ -168,7 +181,7 @@ private:
     [[nodiscard]] NodeInstantiation& slot_for(int node_index, int voice_index);
     [[nodiscard]] int node_index_by_id(const std::string& id) const;
 
-    const LoadedNtpPlugin* plugin_;
+    LoadedNtpPlugin* plugin_; // non-const for set_env_stage only
     std::uint32_t rate_;
     bool is_instrument_;
 

@@ -38,7 +38,7 @@ float block_average(const float* stereo, std::uint32_t frames) {
 
 } // namespace
 
-NtpInstance::NtpInstance(const LoadedNtpPlugin& plugin, std::uint32_t rate)
+NtpInstance::NtpInstance(LoadedNtpPlugin& plugin, std::uint32_t rate)
     : plugin_(&plugin), rate_(rate),
       is_instrument_(plugin.manifest.type == ntp::PluginType::kInstrument) {
     const ntp::Manifest& manifest = plugin.manifest;
@@ -318,6 +318,23 @@ float NtpInstance::node_peak(const std::string& node_id) const {
         peak = std::max(peak, slot.peak);
     }
     return peak;
+}
+
+bool NtpInstance::set_env_stage(const std::string& node_id, int stage_index, double target,
+                                double time) {
+    for (ntp::DspNode& node : plugin_->manifest.graph.nodes) {
+        if (node.id != node_id || node.type != ntp::NodeType::kEnvelope) {
+            continue;
+        }
+        if (stage_index < 0 || stage_index >= static_cast<int>(node.env_stages.size())) {
+            return false;
+        }
+        ntp::EnvelopeStage& stage = node.env_stages[static_cast<std::size_t>(stage_index)];
+        stage.target = std::clamp(target, 0.0, 1.0);
+        stage.time = std::max(0.001, time);
+        return true;
+    }
+    return false;
 }
 
 void NtpInstance::note_on(int note, float velocity) {

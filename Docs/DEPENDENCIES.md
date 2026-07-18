@@ -20,6 +20,7 @@ at Stage 0):
 | libsamplerate | resampling | BSD-2 | 0.2.2 (FetchContent tag; BUILD_TESTING forced off) |
 | miniz | plugin archives | MIT | 3.0.2 (FetchContent tag) |
 | libebur128 | LUFS / true-peak measurement (export normalise) | MIT | v1.2.6 (FetchContent tag; single ebur128.c compiled as a static target, bundled sys/queue.h shim on all platforms) |
+| pffft (marton78 fork) | real-input FFT for the partitioned convolution engine | BSD-3-like (FFTPACK heritage) | master commit a4b03590cc2a4bea56f9721996e3057835799179 (FetchContent; upstream has no release tags. pffft.c + pffft_common.c compiled as a static target, own build system bypassed) |
 | nlohmann-json | manifests/settings | MIT | v3.12.0 (FetchContent tag) |
 | Catch2 | tests | BSL-1.0 | v3.7.1 (FetchContent tag) |
 | CLAP headers | plugin hosting | MIT | 1.2.2 (FetchContent tag, interface lib) |

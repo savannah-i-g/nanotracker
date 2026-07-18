@@ -39,6 +39,17 @@ detail as each fix lands.
   same parameters (wet/dry/decay/preDelay). Same control surface,
   appropriate native cost; convolution parity can be revisited with a
   partitioned-FFT engine if character differences matter in practice.
+  Revisited (Stage 20): REVERB now carries a `mode` parameter — 0
+  keeps the Freeverb bank (default, unchanged), 1 is convolution
+  against the web's synthetic impulse (`lib/reverbIR.ts`
+  construction: pre-delay silence + exp(−3t/decay) noise, 0.97
+  right-channel decorrelation) through the shared partitioned-FFT
+  engine (`audio/convolution_engine.h`). Two documented deviations:
+  fixed-seed noise (determinism) and unit-energy normalisation
+  (standing in for ConvolverNode.normalize). Impulse rebuilds
+  allocate, so mode/decay/preDelay changes in convolution mode
+  republish the rack structurally; wet/dry stay live. Pinned by
+  `tests/fx_chain_test.cpp`.
 - **New (native-only): IT decompressor corrupt-escape guard** — the
   web decompressor (`itImporter.ts` BitReader paths) allows corrupt
   escape sequences to drive the bit width to 0 (a negative shift,
@@ -103,6 +114,14 @@ detail as each fix lands.
   impulses survive; long reverb tails wait on a partitioned-FFT
   engine (post-v1 backlog). Load emits no warning today because the
   cap is structural, not data-dependent — revisit if authors hit it.
+  Revisited (Stage 20): the cap is gone — impulses above 256 taps
+  run through the uniform partitioned-FFT engine
+  (`audio/convolution_engine.h`, 128-frame partitions, zero added
+  latency, null-tested against direct FIR at 1e-5); at or below 256
+  taps direct FIR remains (cheaper there). The only bound left is a
+  10 s-at-device-rate memory guard, refused at load with a collected
+  error — never truncated. Pinned by `tests/convolution_test.cpp`
+  and the >2048-tap fixture in `tests/ntp_test.cpp`.
 - **Mod routes evaluate at block rate (deliberate)** — the web routed
   modulation through live AudioNodes (audio-rate); NTP mod routes are
   k-rate per 128-frame block reading the source's previous block,
@@ -264,3 +283,16 @@ detail as each fix lands.
   audio thread** (a per-trigger std::vector<bool>, caught by the
   debug allocator once RR groups went live): preallocated scratch,
   shared with the slice RR path.
+- **Envelope editor edits the format's truth** (the web editor moved
+  ADSR *parameters* by naming convention): native drags write the
+  envelope node's stage array itself — target/time per stage, the
+  thing FTRK/NTP actually store. Recorded gap: PLGB re-embeds the
+  original archive on save, so stage edits are session-live only
+  (save→load reverts) and plugin-wide (the manifest is shared per
+  plugin id). Persisting per-instance stage overrides is the
+  recorded revisit.
+- **Sprite animations are declarative** (web sheets registered
+  animations from driver code with chain()/tint): NTP declares
+  animations per sprite control (named frame lists, fps default 10,
+  loop flag) with strict collected validation; chain() and tint are
+  not ported (no consumer in the web corpus; ntp-convert unchanged).

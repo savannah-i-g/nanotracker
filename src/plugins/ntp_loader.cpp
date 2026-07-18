@@ -2,6 +2,7 @@
 
 #include "audio/decoders.h"
 #include "plugins/image_decode.h"
+#include "plugins/ntp_graph.h"
 
 #include <nlohmann/json.hpp>
 
@@ -445,10 +446,54 @@ ntp::UiControl parse_control(const json& j, const ntp::Manifest& manifest,
     control.row_layout = j.value("style", "row") != std::string("column");
     control.width = j.value("width", 0.0F);
     control.height = j.value("height", 0.0F);
+    control.animation = j.value("animation", "");
     for (const json& option : j.value("options", json::array())) {
         if (option.is_string()) {
             control.options.push_back(option.get<std::string>());
         }
+    }
+
+    // Sprite sheets: frame grid + named animations. The frame indices
+    // are range-checked against the decoded image in load_ntp_archive
+    // (the grid capacity needs the pixel dimensions); everything
+    // shape-level is validated here.
+    if (control.type == ntp::ControlType::kSprite) {
+        control.frame_width = j.value("frameW", 0);
+        control.frame_height = j.value("frameH", 0);
+        for (const json& aj : j.value("animations", json::array())) {
+            ntp::SpriteAnimation anim;
+            anim.name = aj.value("name", "");
+            anim.fps = aj.value("fps", 10.0);
+            anim.loop = aj.value("loop", false);
+            for (const json& frame : aj.value("frames", json::array())) {
+                if (frame.is_number_integer()) {
+                    anim.frames.push_back(frame.get<int>());
+                }
+            }
+            if (anim.name.empty()) {
+                errors.emplace_back("sprite animation without a name");
+            }
+            if (anim.frames.empty()) {
+                errors.push_back("sprite animation \"" + anim.name +
+                                 "\" needs a non-empty frames[] of frame indices");
+            }
+            if (std::any_of(anim.frames.begin(), anim.frames.end(),
+                            [](int frame) { return frame < 0; })) {
+                errors.push_back("sprite animation \"" + anim.name +
+                                 "\" has a negative frame index");
+            }
+            if (anim.fps <= 0.0) {
+                errors.push_back("sprite animation \"" + anim.name + "\" needs fps > 0");
+            }
+            control.animations.push_back(std::move(anim));
+        }
+        if (!control.animations.empty() &&
+            (control.frame_width <= 0 || control.frame_height <= 0)) {
+            errors.push_back("sprite \"" + control.asset +
+                             "\" declares animations but no frameW/frameH grid");
+        }
+    } else if (j.contains("animations")) {
+        errors.emplace_back("animations[] is only valid on sprite controls");
     }
 
     auto param_exists = [&manifest](const std::string& key) {
@@ -700,6 +745,38 @@ bool parse_ntp_manifest(const std::string& json_text, ntp::Manifest& manifest,
         }
     }
 
+    // Sprite animation names are the interaction-key namespace:
+    // plugin-unique (an `animation` key must resolve to exactly one
+    // sprite) and every reference must exist.
+    std::set<std::string> animation_names;
+    // NOLINTNEXTLINE(misc-no-recursion) — bounded control-tree walk
+    auto collect_animation_names = [&](const ntp::UiControl& control, auto&& recurse) -> void {
+        for (const ntp::SpriteAnimation& anim : control.animations) {
+            if (!anim.name.empty() && !animation_names.insert(anim.name).second) {
+                errors.push_back("duplicate sprite animation name \"" + anim.name + "\"");
+            }
+        }
+        for (const ntp::UiControl& child : control.children) {
+            recurse(child, recurse);
+        }
+    };
+    // NOLINTNEXTLINE(misc-no-recursion) — bounded control-tree walk
+    auto check_animation_refs = [&](const ntp::UiControl& control, auto&& recurse) -> void {
+        if (!control.animation.empty() && !animation_names.contains(control.animation)) {
+            errors.push_back("ui control references unknown animation \"" + control.animation +
+                             "\"");
+        }
+        for (const ntp::UiControl& child : control.children) {
+            recurse(child, recurse);
+        }
+    };
+    for (const ntp::UiControl& control : manifest.ui.controls) {
+        collect_animation_names(control, collect_animation_names);
+    }
+    for (const ntp::UiControl& control : manifest.ui.controls) {
+        check_animation_refs(control, check_animation_refs);
+    }
+
     // ── Presets ──────────────────────────────────────────────────────
     for (const json& pj : root.value("presets", json::array())) {
         ntp::Preset preset;
@@ -861,9 +938,23 @@ std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std:
         case ntp::NodeType::kWavetable:
             decode_table(node.table_file, node.id);
             break;
-        case ntp::NodeType::kConvolver:
+        case ntp::NodeType::kConvolver: {
             decode_sample(node.impulse, "impulse", node.id);
+            // Length guard (ntp_graph.h kConvolverMaxImpulseSeconds):
+            // the partitioned engine keeps the impulse resident as
+            // padded spectra, so an absurd file is refused here with a
+            // collected error — never truncated silently.
+            const auto it = plugin->samples.find(node.impulse);
+            if (it != plugin->samples.end() &&
+                it->second->frames >
+                    static_cast<std::uint64_t>(device_rate) * kConvolverMaxImpulseSeconds) {
+                errors.push_back("node \"" + node.id + "\": impulse \"" + node.impulse +
+                                 "\" is longer than " +
+                                 std::to_string(kConvolverMaxImpulseSeconds) +
+                                 " s at the device rate — refused");
+            }
             break;
+        }
         case ntp::NodeType::kSampler:
             for (const ntp::SampleZone& zone : node.zones) {
                 // User-assignable zones may author only a fallback;
@@ -955,6 +1046,42 @@ std::unique_ptr<LoadedNtpPlugin> load_ntp_archive(const std::uint8_t* data, std:
     };
     for (const ntp::UiControl& control : plugin->manifest.ui.controls) {
         collect_images(control, collect_images);
+    }
+
+    // Sprite frame indices against the decoded sheet: the manifest
+    // pass validated shape, only the pixel dimensions can bound the
+    // grid (web layout: row-major cells of frameW × frameH).
+    // NOLINTNEXTLINE(misc-no-recursion) — bounded control-tree walk
+    auto check_sprite_frames = [&](const ntp::UiControl& control, auto&& recurse) -> void {
+        const auto image_it = plugin->images.find(control.asset);
+        if (!control.animations.empty() && control.frame_width > 0 && control.frame_height > 0 &&
+            image_it != plugin->images.end()) {
+            const LoadedNtpPlugin::Image& image = image_it->second;
+            if (control.frame_width > image.width || control.frame_height > image.height) {
+                errors.push_back("sprite \"" + control.asset + "\": frame cell " +
+                                 std::to_string(control.frame_width) + "x" +
+                                 std::to_string(control.frame_height) +
+                                 " is larger than the image");
+            } else {
+                const int capacity =
+                    (image.width / control.frame_width) * (image.height / control.frame_height);
+                for (const ntp::SpriteAnimation& anim : control.animations) {
+                    for (const int frame : anim.frames) {
+                        if (frame >= capacity) {
+                            errors.push_back("sprite animation \"" + anim.name + "\": frame " +
+                                             std::to_string(frame) + " outside the " +
+                                             std::to_string(capacity) + "-frame sheet");
+                        }
+                    }
+                }
+            }
+        }
+        for (const ntp::UiControl& child : control.children) {
+            recurse(child, recurse);
+        }
+    };
+    for (const ntp::UiControl& control : plugin->manifest.ui.controls) {
+        check_sprite_frames(control, check_sprite_frames);
     }
 
     if (!errors.empty()) {

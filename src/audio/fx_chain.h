@@ -3,17 +3,24 @@
 // (Source/.../src/components/trackerFxModules/*), assembled into
 // channel strips fed by per-tracker-channel sends.
 //
-// Documented divergence: REVERB is a Freeverb-style algorithmic
-// reverb with the web module's parameters (wet/dry/decay/preDelay)
-// instead of convolution with a synthetic impulse — WebAudio provided
-// the convolver for free; natively the algorithmic form is the right
-// cost. Recorded in Docs/FIXES.md.
+// REVERB carries a mode parameter: 0 = Freeverb-style comb/allpass
+// bank (default; the appropriate native cost, Docs/FIXES.md), 1 =
+// convolution against a synthetic exponentially-decaying noise impulse
+// — the web module's construction (lib/reverbIR.ts) run through the
+// partitioned engine (audio/convolution_engine.h) for parity when the
+// character matters. The impulse derives from decay/preDelay, so in
+// convolution mode those three parameters are STRUCTURAL: rebuilding
+// the impulse allocates, which the audio thread must never do, so the
+// session republishes the rack instead of sending kFxParam
+// (app/project_session.cpp set_fx_module_param). wet/dry stay live in
+// both modes.
 //
 // Threading: an FxRack is built OFF the audio thread (allocations) and
 // handed over with the playback bundle; process() and set_param() run
 // on the audio thread and never allocate.
 #pragma once
 
+#include "audio/convolution_engine.h"
 #include "audio/dsp.h"
 #include "engine/tracker_types.h"
 
@@ -87,6 +94,13 @@ private:
     std::array<dsp::Comb, 8> combs_r_;
     std::array<dsp::Allpass, 4> aps_l_;
     std::array<dsp::Allpass, 4> aps_r_;
+    // Reverb convolution mode only (prepared at build when mode = 1;
+    // the comb bank above stays configured as the live fallback for
+    // audio-rate mode automation). Pre-delay is baked into the impulse
+    // as leading silence, exactly as the web built it.
+    ConvolutionEngine conv_l_;
+    ConvolutionEngine conv_r_;
+    std::vector<float> conv_scratch_; // one channel's wet block
 };
 
 // A built strip: module chain + volume/pan + sends.

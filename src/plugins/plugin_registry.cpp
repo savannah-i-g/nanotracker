@@ -68,12 +68,15 @@ const LoadedNtpPlugin* PluginRegistry::find(const std::string& plugin_id) const 
 }
 
 NtpInstance* PluginRegistry::create_instance(const std::string& plugin_id) {
-    const LoadedNtpPlugin* plugin = find(plugin_id);
-    if (plugin == nullptr) {
-        return nullptr;
+    // Mutable lookup: instances write envelope-stage edits back to the
+    // owning plugin's manifest (NtpInstance::set_env_stage).
+    for (const auto& plugin : plugins_) {
+        if (plugin->manifest.id == plugin_id) {
+            instances_.push_back(std::make_unique<NtpInstance>(*plugin, device_rate_));
+            return instances_.back().get();
+        }
     }
-    instances_.push_back(std::make_unique<NtpInstance>(*plugin, device_rate_));
-    return instances_.back().get();
+    return nullptr;
 }
 
 } // namespace nt::plugins

@@ -12,11 +12,13 @@
 // The granular and wavetable nodes are direct ports of the web's
 // host-shipped AudioWorklets (public/audioworklets/granular.js,
 // wavetable.js) — grain pool sizes, jitter behaviour, envelope shapes
-// and parameter sets preserved. The convolver is direct-form FIR with
-// the impulse capped at kMaxImpulseFrames; long-tail convolution waits
-// on a partitioned-FFT engine (recorded in FIXES.md).
+// and parameter sets preserved. The convolver is direct-form FIR up to
+// kConvolverDirectFirMaxFrames taps and a partitioned-FFT engine pair
+// beyond it (audio/convolution_engine.h) — impulse length is bounded
+// only by the loader's kConvolverMaxImpulseSeconds memory guard.
 #pragma once
 
+#include "audio/convolution_engine.h"
 #include "audio/dsp.h"
 #include "ntp/ntp_manifest.h"
 #include "plugins/ntp_loader.h"
@@ -29,8 +31,23 @@
 namespace nt::plugins {
 
 inline constexpr std::uint32_t kNtpBlockFrames = 128;
-inline constexpr std::uint32_t kMaxImpulseFrames = 2048;
 inline constexpr int kMaxGrains = 128;
+
+// Convolver direct-FIR/partitioned-FFT crossover. Per 128-frame block
+// the FFT path costs a fixed two 256-point transforms plus one
+// 256-float multiply-accumulate per partition; the FIR path costs
+// taps * 128 multiply-adds. The curves cross between one and two
+// partitions on current targets, so at or below two partitions
+// (256 taps) the FIR stays — it is cheaper or equal there and has no
+// per-block spectral bookkeeping at all.
+inline constexpr std::uint32_t kConvolverDirectFirMaxFrames = 256;
+
+// Memory guard replacing the old 2048-tap cap: prepared spectra hold
+// roughly 4x the impulse (padded partitions for both channels), so an
+// impulse is refused at load — collected error, not truncation — above
+// this many seconds at the device rate. 10 s of tail is beyond any
+// musical reverb; longer files are almost certainly mis-exported audio.
+inline constexpr std::uint32_t kConvolverMaxImpulseSeconds = 10;
 
 // Per-voice control signals (constant per block).
 struct VoiceControls {
@@ -125,10 +142,15 @@ private:
     // wavetable
     const LoadedNtpPlugin::RawTable* table_ = nullptr;
     double table_phase_ = 0.0;
-    // convolver — direct FIR over a ring of past inputs
+    // convolver — direct FIR over a ring of past inputs below the
+    // crossover (ir_/history_ populated); a mono engine per channel
+    // above it (engines prepared, ir_/history_ left empty). conv_in_/
+    // conv_out_ deinterleave one channel at a time for the engines.
     std::vector<float> ir_l_, ir_r_;
     std::vector<float> history_l_, history_r_;
     std::size_t history_pos_ = 0;
+    audio::ConvolutionEngine conv_engine_l_, conv_engine_r_;
+    std::vector<float> conv_in_, conv_out_;
 
     // sampler
     struct SamplerVoice {

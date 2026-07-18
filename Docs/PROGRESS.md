@@ -3,6 +3,51 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-18 — Stage 20 closed — Plugin platform
+
+- Landed: **one partitioned-FFT convolution engine, two payoffs**
+  (`audio/dsp_fft` wrapping pffft @a4b03590 pinned + BSD licence
+  text; `audio/convolution_engine`): uniform 128-frame partitions,
+  FFT 256, ring of past input spectra, zero added latency
+  (FFTConvolver's two-stage head trick), prepare off-thread /
+  process RT-safe. **NTP convolver uncapped** (direct FIR kept ≤256
+  taps — cheaper there; only bound left is a 10s-at-device-rate
+  guard, refused with a collected error, never truncated).
+  **REVERB convolution mode** (mode param appended, saved indices
+  stable): the web's `reverbIR.ts` synthetic impulse (pre-delay
+  silence + exp(−3t/decay) noise, 0.97 decorrelation) with
+  fixed-seed noise + unit-energy normalisation (documented
+  deviations); mode/decay/preDelay in conv mode republish
+  structurally, wet/dry stay live. **VST3 editor windows**
+  (`ext/vst3_editor_window` on the shared EditorHostSurface;
+  `ext/vst3_run_loop`): Linux IRunLoop exposed BOTH via the
+  PlugFrame and the factory host context (PlugProvider alone never
+  calls setHostContext — found and handled), UI-thread dispatch with
+  tombstoned unregister-during-dispatch, resizeView acked in the
+  same callstack; Win32 compiles the loop away. **Sprite
+  animations** (declarative per-control: named frame lists, fps
+  default 10, loop; interaction one-shots; strict collected
+  validation incl. post-decode sheet-capacity). **Envelope editor
+  edits stages for real** (drag target/time, preview while held, one
+  structural commit per drag via `set_plugin_env_stage`). Both
+  FIXES.md revisit entries closed + four new entries (incl. the
+  recorded gap: envelope stage edits are session-live — PLGB
+  re-embeds the original archive; per-instance overrides are the
+  revisit).
+- Verification: 125/125 both trees (17 new: convolution null tests
+  vs direct FIR at 1e-5 across lengths/phases, 1s-impulse
+  reproduction, determinism, RT-safety under the live allocator
+  guard, >2048-tap fixture loads and renders, REVERB tail tracks
+  decay, IRunLoop register/dispatch/unregister-during-dispatch,
+  sprite loader validation, envelope commit read-back); scripted
+  fixture runs with region-asserted screenshots (sprite idle
+  animation flips frames, interaction fires the one-shot; envelope
+  before/preview/committed montage); **TyrellN6.vst3 opens its real
+  GUI** in our surface (X-tree check, u-he log confirms parent +
+  onSize + removed(), repaint proves IRunLoop dispatch); CI green
+  both platforms.
+- Backup: `NanoTracker_stage20_2026-07-18.tar.gz`; git tag `stage-20`.
+
 ## 2026-07-18 — Stage 19 closed — Sampler platform
 
 - Landed: **POVR user slots live** — the block parses to structured

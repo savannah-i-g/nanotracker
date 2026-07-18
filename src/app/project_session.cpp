@@ -1,6 +1,7 @@
 #include "app/project_session.h"
 
 #include "engine/tracker_engine.h"
+#include "ext/vst3_run_loop.h"
 #include "graph/graph_compile.h"
 #include "io/ftrk_reader.h"
 #include "io/ftrk_writer.h"
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <fstream>
 #include <numbers>
+#include <string_view>
 #include <utility>
 
 namespace nt::app {
@@ -370,6 +372,7 @@ void ProjectSession::rebuild_workspace_nodes() {
     clap_by_node_.clear();      // instances retire in clap_instances_
     clap_editors_.clear();
     vst3_by_node_.clear();
+    vst3_editors_.clear();
     preview_plugin_note_ = -1;
     workspace_.add_node(graph::make_tracker_bus_node(project_.channels));
     workspace_.add_node(graph::make_master_in_node());
@@ -528,6 +531,28 @@ void ProjectSession::set_plugin_param(const std::string& workspace_id, const std
     if (plugins::NtpInstance* instance = plugin_instance(workspace_id)) {
         instance->set_param(key, value);
     }
+}
+
+bool ProjectSession::set_plugin_env_stage(const std::string& workspace_id,
+                                          const std::string& node_id, int stage_index,
+                                          double target, double time) {
+    plugins::NtpInstance* instance = plugin_instance(workspace_id);
+    if (instance == nullptr) {
+        error_ = "no plugin instance for \"" + workspace_id + "\"";
+        return false;
+    }
+    // Structural: voices read the stage array in place, so the write
+    // happens inside the same stop→mutate→publish window sequence
+    // notes use (kSetBundle resets plugin voices in the drain).
+    stop();
+    if (!instance->set_env_stage(node_id, stage_index, target, time)) {
+        error_ =
+            "no envelope stage " + std::to_string(stage_index) + " on node \"" + node_id + "\"";
+        return false;
+    }
+    undo_.clear(); // stage writes are outside the undo model
+    publish_bundle();
+    return true;
 }
 
 void ProjectSession::preview_plugin_note(int slot, int midi_note, float velocity) {
@@ -928,6 +953,48 @@ void ProjectSession::update_clap_editors() {
     }
 }
 
+bool ProjectSession::open_vst3_editor(const std::string& workspace_id) {
+    if (vst3_editors_.contains(workspace_id)) {
+        return true;
+    }
+    ext::Vst3Plugin* instance = vst3_instance(workspace_id);
+    if (instance == nullptr) {
+        error_ = "no VST3 instance for \"" + workspace_id + "\"";
+        return false;
+    }
+    std::string editor_error;
+    auto editor = ext::Vst3EditorWindow::open(*instance, editor_error);
+    if (editor == nullptr) {
+        error_ = editor_error;
+        return false;
+    }
+    vst3_editors_[workspace_id] = std::move(editor);
+    return true;
+}
+
+bool ProjectSession::vst3_editor_open(const std::string& workspace_id) const {
+    return vst3_editors_.contains(workspace_id);
+}
+
+void ProjectSession::update_vst3_editors() {
+#ifndef _WIN32
+    // Editor windows dispatch the run loop from their own update();
+    // with none open the loop must still turn — plugins can register
+    // timers/fds through the factory host context before any editor
+    // exists (ext/vst3_run_loop.h).
+    if (vst3_editors_.empty()) {
+        ext::Vst3RunLoop::instance().dispatch();
+    }
+#endif
+    for (auto it = vst3_editors_.begin(); it != vst3_editors_.end();) {
+        if (!it->second->update()) {
+            it = vst3_editors_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 bool ProjectSession::load_vst3_file(const std::filesystem::path& path) {
     std::string vst3_error;
     auto module = ext::Vst3Module::open(path, vst3_error);
@@ -1199,6 +1266,7 @@ bool ProjectSession::remove_workspace_node(const std::string& workspace_id) {
     clap_by_node_.erase(workspace_id);      // instance retires in clap_instances_
     clap_editors_.erase(workspace_id);
     vst3_by_node_.erase(workspace_id);
+    vst3_editors_.erase(workspace_id);
     // Removal rips touching cables; history would need them restored in
     // order, so this clears (consistent with other structural edits).
     workspace_.remove_node(workspace_id);
@@ -1483,11 +1551,40 @@ void ProjectSession::set_fx_module_param(int channel, int module_index, int para
     if (module_index < 0 || module_index >= static_cast<int>(modules.size())) {
         return;
     }
-    auto& params = modules[static_cast<std::size_t>(module_index)].params;
-    if (param_index < 0 || param_index >= static_cast<int>(params.size())) {
+    engine::FxModuleInstance& module = modules[static_cast<std::size_t>(module_index)];
+    const audio::FxModuleDef* def = audio::fx_module_by_id(module.module_id);
+    if (def == nullptr || param_index < 0 || param_index >= static_cast<int>(def->params.size())) {
         return;
     }
+    // Projects saved before a parameter existed persist a shorter list
+    // (e.g. pre-mode REVERBs). The UI indexes by definition order, so
+    // grow the missing tail from definition defaults before writing.
+    auto& params = module.params;
+    for (std::size_t i = params.size(); i < def->params.size(); ++i) {
+        params.emplace_back(def->params[i].key, def->params[i].def);
+    }
     params[static_cast<std::size_t>(param_index)].second = value;
+
+    // REVERB's convolution mode derives its impulse from mode/decay/
+    // preDelay; rebuilding an impulse allocates, so those writes are
+    // structural — an honest stop + rack republish instead of a live
+    // kFxParam (audio/fx_chain.h). wet/dry (and everything in comb
+    // mode) stay live.
+    if (module.module_id == "reverb") {
+        const std::string_view key = def->params[static_cast<std::size_t>(param_index)].key;
+        float mode = 0.0F;
+        for (const auto& [param_key, param_value] : params) {
+            if (param_key == "mode") {
+                mode = param_value;
+            }
+        }
+        if (key == "mode" || (mode >= 0.5F && (key == "decay" || key == "preDelay"))) {
+            stop();
+            publish_bundle();
+            return;
+        }
+    }
+
     // Live update to the running rack.
     audio_.send({.type = audio::Command::Type::kFxParam,
                  .value = value,

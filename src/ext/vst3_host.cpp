@@ -1,9 +1,13 @@
 #include "ext/vst3_host.h"
 
+#include "ext/vst3_run_loop.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <pluginterfaces/gui/iplugview.h>
 #include <pluginterfaces/vst/ivstaudioprocessor.h>
+#include <pluginterfaces/vst/ivsteditcontroller.h>
 #include <pluginterfaces/vst/ivstevents.h>
 #include <pluginterfaces/vst/ivstprocesscontext.h>
 #include <public.sdk/source/common/memorystream.h>
@@ -21,9 +25,28 @@ namespace {
 
 using namespace Steinberg;
 
+// The host context: the SDK's HostApplication surface, extended on
+// Linux to answer IRunLoop — the factory-context exposure route
+// (Research/07: a plugin must reach the run loop through
+// IPluginFactory3::setHostContext even before it has an editor; the
+// IPlugFrame route lives in ext/vst3_editor_window).
+class Vst3HostContext final : public Vst::HostApplication {
+public:
+    tresult PLUGIN_API queryInterface(const char* interface_id, void** obj) override {
+#ifndef _WIN32
+        // COM seam: FUID converts to a TUID char array for iidEqual.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+        if (FUnknownPrivate::iidEqual(interface_id, Linux::IRunLoop::iid)) {
+            return Vst3RunLoop::instance().queryInterface(interface_id, obj);
+        }
+#endif
+        return Vst::HostApplication::queryInterface(interface_id, obj);
+    }
+};
+
 // The plugin context every PlugProvider consumes. One per process.
-Vst::HostApplication& host_application() {
-    static Vst::HostApplication instance;
+Vst3HostContext& host_application() {
+    static Vst3HostContext instance;
     return instance;
 }
 
@@ -45,6 +68,11 @@ std::unique_ptr<Vst3Module> Vst3Module::open(const std::filesystem::path& path,
         error = load_error.empty() ? "module load failed" : load_error;
         return nullptr;
     }
+    // PlugProvider only passes the context to component/controller
+    // initialize; IPluginFactory3::setHostContext is a separate,
+    // documented route plugins use to find the run loop and must be
+    // fed explicitly (no-op for factories below IPluginFactory3).
+    module->getFactory().setHostContext(&host_application());
 
     auto self = std::unique_ptr<Vst3Module>(new Vst3Module());
     self->impl_ = std::make_unique<Impl>();
@@ -331,6 +359,13 @@ void Vst3Plugin::process_block(const float* in, float* out, std::uint32_t frames
         out[static_cast<std::size_t>(i) * 2] = out_l[i];
         out[(static_cast<std::size_t>(i) * 2) + 1] = out_r[i];
     }
+}
+
+Steinberg::IPlugView* Vst3Plugin::create_editor_view() const {
+    if (impl_->controller == nullptr) {
+        return nullptr;
+    }
+    return impl_->controller->createView(Vst::ViewType::kEditor);
 }
 
 std::vector<std::uint8_t> Vst3Plugin::save_state() const {

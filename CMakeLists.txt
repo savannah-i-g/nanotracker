@@ -171,6 +171,30 @@ target_include_directories(ebur128 SYSTEM PRIVATE ${libebur128_SOURCE_DIR}/ebur1
 target_compile_definitions(ebur128 PRIVATE $<$<C_COMPILER_ID:MSVC>:_USE_MATH_DEFINES>)
 target_compile_options(ebur128 PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>)
 
+# pffft (marton78 fork) — real-input FFTs for the partitioned
+# convolution engine (Docs/Plan_PostV1/Research/04). BSD-3-like
+# FFTPACK-heritage licence. Upstream has no release tags, so the pin is
+# a master commit. Its own CMake is geared to installs/benchmarks and
+# probes for PAPI/MIPP; the library proper is two C99 TUs, compiled
+# directly as a static target (same treatment as ebur128).
+FetchContent_Declare(pffft
+    GIT_REPOSITORY https://github.com/marton78/pffft.git
+    GIT_TAG a4b03590cc2a4bea56f9721996e3057835799179)
+FetchContent_Populate(pffft)
+add_library(pffft STATIC
+    ${pffft_SOURCE_DIR}/src/pffft.c
+    ${pffft_SOURCE_DIR}/src/pffft_common.c)
+target_include_directories(pffft SYSTEM PUBLIC ${pffft_SOURCE_DIR}/include)
+# pffft.c includes its public header as "pffft.h".
+target_include_directories(pffft PRIVATE ${pffft_SOURCE_DIR}/include/pffft)
+# Static archive on every platform: without this, pffft.h declares
+# __declspec(dllimport) on MSVC and the link fails.
+target_compile_definitions(pffft PUBLIC PFFFT_STATIC_DEFINE)
+target_compile_options(pffft PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>)
+if(UNIX)
+    target_link_libraries(pffft PUBLIC m)
+endif()
+
 # libogg + libvorbis — OGG export encoding. BSD.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(ogg
@@ -257,6 +281,7 @@ add_library(vst3_hosting STATIC
     ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/hosting/plugprovider.cpp
     ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/hosting/processdata.cpp
     ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/utility/stringconvert.cpp
+    ${vst3sdk_SOURCE_DIR}/public.sdk/source/common/commoniids.cpp
     ${vst3sdk_SOURCE_DIR}/public.sdk/source/common/memorystream.cpp
     ${vst3sdk_SOURCE_DIR}/base/source/fobject.cpp
     ${vst3sdk_SOURCE_DIR}/base/source/baseiids.cpp
@@ -319,7 +344,9 @@ add_executable(nanotracker
     src/ui/workspace_view.cpp
     src/audio/audio_device_openal.cpp
     src/audio/audio_engine.cpp
+    src/audio/convolution_engine.cpp
     src/audio/decoders.cpp
+    src/audio/dsp_fft.cpp
     src/audio/effect_midi.cpp
     src/audio/fx_chain.cpp
     src/audio/graph_runner.cpp
@@ -329,7 +356,9 @@ add_executable(nanotracker
     src/engine/tracker_engine.cpp
     src/ext/clap_host.cpp
     src/ext/editor_window.cpp
+    src/ext/vst3_editor_window.cpp
     src/ext/vst3_host.cpp
+    src/ext/vst3_run_loop.cpp
     src/graph/graph_compile.cpp
     src/graph/graph_model.cpp
     src/graph/graph_wpbr.cpp
@@ -369,7 +398,7 @@ target_link_libraries(nanotracker PRIVATE
     glfw OpenGL::GL imgui glad_gl_core_33 nlohmann_json::nlohmann_json
     OpenAL::OpenAL dr_libs stb samplerate libopenmpt::libopenmpt miniz
     clap vst3_hosting rtmidi ixwebsocket vorbisenc vorbis ogg ebur128
-    ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
+    pffft ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
 
 # Third-party single-file codec implementations: warnings are theirs.
 set(NT_SILENCE_WARNINGS $<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>)

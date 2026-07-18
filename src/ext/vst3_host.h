@@ -16,6 +16,13 @@
 #include <string>
 #include <vector>
 
+namespace Steinberg {
+// SDK interface, forward-declared only — its destructor is the SDK's
+// business (COM release() semantics, never deleted through this type).
+// NOLINTNEXTLINE(cppcoreguidelines-virtual-class-destructor)
+class IPlugView;
+} // namespace Steinberg
+
 namespace nt::ext {
 
 struct Vst3ParamInfo {
@@ -96,6 +103,12 @@ public:
     // length header (the FTRK external-plugin chunk format).
     [[nodiscard]] std::vector<std::uint8_t> save_state() const;
     bool load_state(const std::vector<std::uint8_t>& bytes);
+
+    // Editor view from the controller (createView "editor"), addRef'd
+    // for the caller — ext/vst3_editor_window adopts it. Null when the
+    // plugin has no controller or declares no editor; the auto-param
+    // panel remains.
+    [[nodiscard]] Steinberg::IPlugView* create_editor_view() const;
 
 private:
     friend class Vst3Module;

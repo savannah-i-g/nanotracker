@@ -19,6 +19,7 @@
 #include "engine/tracker_types.h"
 #include "ext/clap_host.h"
 #include "ext/editor_window.h"
+#include "ext/vst3_editor_window.h"
 #include "ext/vst3_host.h"
 #include "graph/graph_model.h"
 #include "graph/graph_wpbr.h"
@@ -222,6 +223,16 @@ public:
     void set_plugin_param(const std::string& workspace_id, const std::string& key,
                           float value) const;
 
+    // Writes one envelope stage point (target/time) on a plugin's
+    // envelope node. Structural: voices read the stage array in place,
+    // so the transport stops and the bundle republishes — the same
+    // discipline as sequence-note edits. One call per completed drag
+    // (ui/ntp_ui previews locally until release). Values clamp to
+    // target 0..1, time ≥ 1 ms. Returns false when the node/stage does
+    // not resolve.
+    bool set_plugin_env_stage(const std::string& workspace_id, const std::string& node_id,
+                              int stage_index, double target, double time);
+
     // Republishes the graph after a node strip edit (volume/pan/
     // bypass) — the runner snapshots those at build. Live swap.
     void publish_workspace_strips() { publish_graph(); }
@@ -301,6 +312,13 @@ public:
     std::string add_vst3_node(const std::string& class_id);
     [[nodiscard]] ext::Vst3Plugin* vst3_instance(const std::string& workspace_id) const;
 
+    // VST3 editor OS windows — the CLAP editor contract verbatim.
+    // update additionally turns the Linux IRunLoop every frame even
+    // with no editor open (factory-context registrations).
+    bool open_vst3_editor(const std::string& workspace_id);
+    [[nodiscard]] bool vst3_editor_open(const std::string& workspace_id) const;
+    void update_vst3_editors();
+
 private:
     void decode_samples();
     void publish_bundle();
@@ -363,6 +381,7 @@ private:
     std::vector<std::unique_ptr<ext::Vst3Module>> vst3_modules_;
     std::vector<std::unique_ptr<ext::Vst3Plugin>> vst3_instances_;
     std::map<std::string, ext::Vst3Plugin*> vst3_by_node_;
+    std::map<std::string, std::unique_ptr<ext::Vst3EditorWindow>> vst3_editors_;
     std::map<std::string, std::string> ext_path_by_node_; // library paths for XPLG
     // POVR carries: a raw block the reader could not interpret, and
     // parsed entries whose instance never resolved at load (missing

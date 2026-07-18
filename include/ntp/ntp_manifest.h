@@ -257,6 +257,20 @@ enum class ControlType : unsigned char {
     kSprite,
 };
 
+// A named animation on a sprite control's sheet: an explicit frame
+// sequence (row-major indices into the frameW × frameH grid over the
+// asset image) at `fps` (web DEFAULT_SPRITE_FPS = 10). Loop = the
+// sprite's idle loop (the first looping animation plays untriggered);
+// non-loop = a one-shot fired by controls carrying this name as their
+// `animation` interaction key. Names are plugin-unique so interaction
+// keys resolve unambiguously.
+struct SpriteAnimation {
+    std::string name;
+    std::vector<int> frames;
+    double fps = 10.0;
+    bool loop = false;
+};
+
 struct UiControl {
     ControlType type = ControlType::kKnob;
     std::string parameter;   // bound param key
@@ -270,6 +284,19 @@ struct UiControl {
     bool row_layout = true;           // group direction
     float width = 0.0F;               // pixel hints (0 = auto)
     float height = 0.0F;
+
+    // ── Sprite sheets (sprite controls) ──────────────────────────────
+    // Frame cell size in pixels; 0 = the whole image is one frame
+    // (static sprites need nothing else). Required when animations
+    // exist.
+    int frame_width = 0;
+    int frame_height = 0;
+    std::vector<SpriteAnimation> animations;
+
+    // Interaction key on value controls: the named one-shot animation
+    // the host triggers when this control is interacted with. Empty =
+    // no animation coupling (web pluginTypes.ts `animation`).
+    std::string animation;
 };
 
 struct UiDef {
