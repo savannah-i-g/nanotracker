@@ -18,6 +18,8 @@
  */
 #include <clap/clap.h>
 
+#include <stdio.h> // snprintf is an inline from here on MSVC; without it the
+                   // fixture emits an unresolved external and fails to link.
 #include <stdlib.h>
 #include <string.h>
 
