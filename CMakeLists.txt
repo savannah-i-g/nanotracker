@@ -359,6 +359,8 @@ add_executable(nanotracker
     src/audio/sample_reclaim.cpp
     src/engine/sequence_ops.cpp
     src/engine/tracker_engine.cpp
+    src/ext/bridge/bridge_shm.cpp
+    src/ext/bridge/bridged_plugin.cpp
     src/ext/clap_host.cpp
     src/ext/editor_window.cpp
     src/ext/vst3_editor_window.cpp
@@ -433,6 +435,33 @@ if(NT_SANITIZE)
     target_compile_options(nanotracker PRIVATE -fsanitize=address,undefined)
     target_link_options(nanotracker PRIVATE -fsanitize=address,undefined)
 endif()
+
+# ── Bridge host (out-of-process plugin child; Stage 29) ──────────────
+# Sibling of `nanotracker`, spawned per bridged plugin and located next
+# to the main executable. S29a is the echo/gain transport stand-in and
+# links only the shm transport; S29b+ links clap_host/vst3_host to host
+# real plugins. Linux-first (§H.2): on other platforms the sources
+# compile to a documented "unsupported" stub.
+add_executable(nanotracker-bridge-host
+    src/ext/bridge/bridge_host_main.cpp
+    src/ext/bridge/bridge_shm.cpp)
+target_include_directories(nanotracker-bridge-host PRIVATE src include)
+if(MSVC)
+    target_compile_options(nanotracker-bridge-host PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(nanotracker-bridge-host PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+endif()
+if(UNIX AND NOT APPLE)
+    # shm_open lives in librt on Linux; futex/nanosleep need pthread.
+    target_link_libraries(nanotracker-bridge-host PRIVATE rt pthread)
+endif()
+if(NT_SANITIZE)
+    target_compile_options(nanotracker-bridge-host PRIVATE -fsanitize=address,undefined)
+    target_link_options(nanotracker-bridge-host PRIVATE -fsanitize=address,undefined)
+endif()
+# Build the child whenever the app builds, so it lands beside it.
+add_dependencies(nanotracker nanotracker-bridge-host)
 
 # ── Tools ────────────────────────────────────────────────────────────
 # Web plugin manifest → NTP v1 converter (JSON in, JSON out).

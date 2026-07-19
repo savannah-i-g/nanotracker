@@ -30,6 +30,7 @@ add_executable(nt_tests
     instance_state_test.cpp
     povr_session_test.cpp
     clap_host_test.cpp
+    bridge_test.cpp
     vst3_run_loop_test.cpp
     midi_test.cpp
     midi_record_test.cpp
@@ -73,6 +74,8 @@ add_executable(nt_tests
     ${CMAKE_SOURCE_DIR}/src/modplay/module_player.cpp
     ${CMAKE_SOURCE_DIR}/src/engine/sequence_ops.cpp
     ${CMAKE_SOURCE_DIR}/src/engine/tracker_engine.cpp
+    ${CMAKE_SOURCE_DIR}/src/ext/bridge/bridge_shm.cpp
+    ${CMAKE_SOURCE_DIR}/src/ext/bridge/bridged_plugin.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/clap_host.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/editor_window.cpp
     ${CMAKE_SOURCE_DIR}/src/ext/vst3_editor_window.cpp
@@ -102,7 +105,15 @@ target_link_libraries(nt_tests PRIVATE Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json OpenAL::OpenAL dr_libs stb samplerate
     libopenmpt::libopenmpt miniz clap vst3_hosting rtmidi ixwebsocket
     vorbisenc vorbis ogg ebur128 pffft
-    ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>)
+    ${CMAKE_DL_LIBS} $<$<BOOL:${UNIX}>:X11::X11>
+    # bridge host-side transport: shm_open (librt) + futex/threads.
+    $<$<AND:$<BOOL:${UNIX}>,$<NOT:$<BOOL:${APPLE}>>>:rt>
+    $<$<BOOL:${UNIX}>:pthread>)
+
+# bridge_test spawns the real child; it needs the built binary's path.
+add_dependencies(nt_tests nanotracker-bridge-host)
+target_compile_definitions(nt_tests PRIVATE
+    NT_BRIDGE_HOST="$<TARGET_FILE:nanotracker-bridge-host>")
 
 # Real .clap binary for host verification (loaded at runtime by
 # clap_host_test).
