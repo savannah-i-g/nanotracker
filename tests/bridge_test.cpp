@@ -10,12 +10,18 @@
 //   - killing the child mid-stream yields silence and never blocks or
 //     crashes the host callback — the RT-safety core, run under ASan;
 //   - process_block is allocation-free under an RtScope (the debug
-//     allocator aborts on any allocation on the audio path).
+//     allocator aborts on any allocation on the audio path);
+//   - S29b: a child hosting the in-tree CLAP fixture produces audio that
+//     matches the same fixture in-process (within float tolerance, after
+//     the one-block latency); plugin state round-trips through the
+//     control socket; a child that fails to load a plugin exits cleanly
+//     and the host never hangs.
 //
 // Device-dependent bits (spawn + shm) WARN-skip when the environment
 // cannot provide them; Linux CI supports both, so they run fully there.
 #include "ext/bridge/bridge_protocol.h"
 #include "ext/bridge/bridged_plugin.h"
+#include "ext/clap_host.h"
 #include "rt/rt_assert.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -26,6 +32,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -48,6 +55,19 @@ std::unique_ptr<BridgedPlugin> try_spawn(float gain, bool has_input, std::string
     config.echo_gain = gain;
     config.has_audio_input = has_input;
     config.host_exe = NT_BRIDGE_HOST; // built child binary (CMake define)
+    return BridgedPlugin::spawn(config, error);
+}
+
+// Spawn a child hosting the in-tree CLAP fixture (the same nt.test.sine
+// clap_host_test drives), so the bridged output can be compared against
+// the plugin in-process.
+std::unique_ptr<BridgedPlugin> try_spawn_clap(const std::string& plugin_id, std::string& error) {
+    BridgedPlugin::Config config;
+    config.sample_rate = 48000;
+    config.has_audio_input = false; // nt.test.sine is an instrument
+    config.host_exe = NT_BRIDGE_HOST;
+    config.plugin_path = NT_TEST_CLAP; // built fixture .clap (CMake define)
+    config.plugin_id = plugin_id;
     return BridgedPlugin::spawn(config, error);
 }
 
@@ -187,4 +207,100 @@ TEST_CASE("bridge process_block is allocation-free under RtScope", "[bridge]") {
         }
     }
     SUCCEED("process_block ran allocation-free on the audio path");
+}
+
+TEST_CASE("bridged CLAP output matches the in-process plugin", "[bridge]") {
+    // The headline correctness proof: the child hosting the fixture and
+    // the same fixture in-process, given identical notes, must produce
+    // identical audio — offset by exactly one block of pipeline latency.
+    std::string error;
+    auto bridged = try_spawn_clap("nt.test.sine", error);
+    if (!bridged) {
+        WARN("bridge spawn unavailable: " + error);
+        SKIP("bridge child could not be spawned in this environment");
+    }
+
+    // In-process reference of the same fixture.
+    auto library = nt::ext::ClapLibrary::open(NT_TEST_CLAP, error);
+    REQUIRE(library != nullptr);
+    auto reference = nt::ext::ClapPlugin::create(*library, "nt.test.sine", 48000, error);
+    INFO(error);
+    REQUIRE(reference != nullptr);
+
+    constexpr int kBlocks = 24;
+    std::vector<std::array<float, kStereo>> ref_out(kBlocks);
+    std::vector<std::array<float, kStereo>> br_out(kBlocks);
+
+    // Hold A-4 on both from the first block.
+    reference->plugin_note_on(69, 1.0F);
+    bridged->plugin_note_on(69, 1.0F);
+    for (int b = 0; b < kBlocks; ++b) {
+        reference->process_block(nullptr, ref_out[b].data(), kFrames);
+        bridged->process_block(nullptr, br_out[b].data(), kFrames);
+        REQUIRE(spin_wait([&] { return bridged->output_pending(); }, 500ms));
+    }
+
+    // The reference actually makes sound (else the match is vacuous).
+    CHECK(peak(ref_out[0]) > 0.1F);
+    // One-block latency: br_out[0] is silence; br_out[b] == ref_out[b-1].
+    CHECK(peak(br_out[0]) < 1e-6F);
+    for (int b = 1; b < kBlocks; ++b) {
+        INFO("block " << b);
+        for (std::size_t i = 0; i < kStereo; ++i) {
+            REQUIRE(std::abs(br_out[b][i] - ref_out[b - 1][i]) < 1e-5F);
+        }
+    }
+}
+
+TEST_CASE("bridge plugin state round-trips through the control socket", "[bridge]") {
+    std::string error;
+    auto first = try_spawn_clap("nt.test.sine", error);
+    if (!first) {
+        WARN("bridge spawn unavailable: " + error);
+        SKIP("bridge child could not be spawned in this environment");
+    }
+
+    // Drive the gain param (index 0, 0..1) to a known non-default value
+    // and let the child apply it across a full pipeline round-trip before
+    // asking it to save.
+    std::array<float, kStereo> out{};
+    first->plugin_set_param_cv(0, 0.8F);
+    for (int b = 0; b < 4; ++b) {
+        first->process_block(nullptr, out.data(), kFrames);
+        REQUIRE(spin_wait([&] { return first->heartbeat() > 0; }, 500ms));
+    }
+
+    const std::vector<std::uint8_t> blob = first->save_state();
+    // The fixture's state is its gain as a raw double.
+    REQUIRE(blob.size() == sizeof(double));
+    double saved_gain = 0.0;
+    std::memcpy(&saved_gain, blob.data(), sizeof(double));
+    CHECK(std::abs(saved_gain - 0.8) < 1e-6);
+
+    // A fresh child, loaded with the blob, must re-serialise it identically.
+    auto second = try_spawn_clap("nt.test.sine", error);
+    REQUIRE(second != nullptr);
+    REQUIRE(second->load_state(blob));
+    const std::vector<std::uint8_t> reloaded = second->save_state();
+    CHECK(reloaded == blob);
+}
+
+TEST_CASE("bridge child that fails to load a plugin exits without hanging", "[bridge]") {
+    // A valid .clap but a wrong plugin id: the child's create() fails, so
+    // it exits without signalling ready. The host must observe not-ready
+    // and return null promptly — the graph then binds nothing and the
+    // node falls back to silence (the runner's no-binding path).
+    std::string error;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto plugin = try_spawn_clap("nt.does.not.exist", error);
+    const auto dt = std::chrono::steady_clock::now() - t0;
+
+    if (plugin) {
+        // Spawn itself is unavailable here only if the child binary/shm is
+        // missing; a successful spawn with a bad id is a real failure.
+        FAIL("a bad plugin id must not produce a running bridge");
+    }
+    INFO(error);
+    CHECK(dt < 3s); // bounded: no hang waiting on the failed child
+    CHECK_FALSE(error.empty());
 }

@@ -438,14 +438,18 @@ endif()
 
 # ── Bridge host (out-of-process plugin child; Stage 29) ──────────────
 # Sibling of `nanotracker`, spawned per bridged plugin and located next
-# to the main executable. S29a is the echo/gain transport stand-in and
-# links only the shm transport; S29b+ links clap_host/vst3_host to host
-# real plugins. Linux-first (§H.2): on other platforms the sources
-# compile to a documented "unsupported" stub.
+# to the main executable. S29b links clap_host.cpp + shared_library.cpp
+# (unchanged) so the child hosts a real CLAP — it is a NanoTracker plugin
+# host with the engine/UI/device stripped away. VST3-in-child is S29e.
+# Linux-first (§H.2): on other platforms the sources compile to a
+# documented "unsupported" stub.
 add_executable(nanotracker-bridge-host
     src/ext/bridge/bridge_host_main.cpp
-    src/ext/bridge/bridge_shm.cpp)
+    src/ext/bridge/bridge_shm.cpp
+    src/ext/clap_host.cpp
+    src/platform/shared_library.cpp)
 target_include_directories(nanotracker-bridge-host PRIVATE src include)
+target_link_libraries(nanotracker-bridge-host PRIVATE clap ${CMAKE_DL_LIBS})
 if(MSVC)
     target_compile_options(nanotracker-bridge-host PRIVATE /W4 /utf-8)
 else()
@@ -453,7 +457,7 @@ else()
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
 if(UNIX AND NOT APPLE)
-    # shm_open lives in librt on Linux; futex/nanosleep need pthread.
+    # shm_open lives in librt on Linux; futex/nanosleep/threads need pthread.
     target_link_libraries(nanotracker-bridge-host PRIVATE rt pthread)
 endif()
 if(NT_SANITIZE)
