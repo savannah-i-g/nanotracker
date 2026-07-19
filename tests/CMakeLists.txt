@@ -115,17 +115,27 @@ add_dependencies(nt_tests nanotracker-bridge-host)
 target_compile_definitions(nt_tests PRIVATE
     NT_BRIDGE_HOST="$<TARGET_FILE:nanotracker-bridge-host>")
 
-# Real .clap binary for host verification (loaded at runtime by
-# clap_host_test).
-add_library(nt_test_clap MODULE fixtures/test_clap_plugin.c)
-target_link_libraries(nt_test_clap PRIVATE clap $<$<BOOL:${UNIX}>:m>)
-set_target_properties(nt_test_clap PROPERTIES
-    PREFIX "" SUFFIX ".clap" C_VISIBILITY_PRESET hidden)
-target_compile_options(nt_test_clap PRIVATE
-    $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>)
-add_dependencies(nt_tests nt_test_clap)
+# Real .clap binaries for host verification, loaded at runtime: the sine
+# instrument (clap_host_test + the bridge round-trip/state tests) and the
+# deliberately-crashing effect (the S29c crash->bypass->restart exit
+# criterion in bridge_test). Both are plain C MODULEs, never linked into
+# the app or the bridge host; they build identically on the plain and ASan
+# runners (no sanitizer flags — the crash is a real child death either way).
+foreach(clap_fixture nt_test_clap:test_clap_plugin.c nt_test_crash:test_crash_clap_plugin.c)
+    string(REPLACE ":" ";" parts ${clap_fixture})
+    list(GET parts 0 fixture_target)
+    list(GET parts 1 fixture_source)
+    add_library(${fixture_target} MODULE fixtures/${fixture_source})
+    target_link_libraries(${fixture_target} PRIVATE clap $<$<BOOL:${UNIX}>:m>)
+    set_target_properties(${fixture_target} PROPERTIES
+        PREFIX "" SUFFIX ".clap" C_VISIBILITY_PRESET hidden)
+    target_compile_options(${fixture_target} PRIVATE
+        $<IF:$<C_COMPILER_ID:MSVC>,/w,-w>)
+    add_dependencies(nt_tests ${fixture_target})
+endforeach()
 target_compile_definitions(nt_tests PRIVATE
-    NT_TEST_CLAP="$<TARGET_FILE:nt_test_clap>")
+    NT_TEST_CLAP="$<TARGET_FILE:nt_test_clap>"
+    NT_TEST_CRASH_CLAP="$<TARGET_FILE:nt_test_crash>")
 
 # Real native-stage binaries for the C-ABI host verification (plain
 # C99 against include/ntp/ntp_stage_abi.h — both fixtures must build

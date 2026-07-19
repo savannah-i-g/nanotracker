@@ -16,6 +16,13 @@
 //     the one-block latency); plugin state round-trips through the
 //     control socket; a child that fails to load a plugin exits cleanly
 //     and the host never hangs.
+//   - S29c (the stage exit criterion): a bridged plugin's deliberate crash
+//     leaves the host callback wait-free (ASan-clean), flips the node to
+//     bypass (dry passthrough for an effect, silence for an instrument),
+//     is confirmed by the session-thread reaper within a bounded number of
+//     frames, keeps the session saveable from the shadow with the child
+//     dead, and is recovered by restart() bringing a fresh child back to
+//     live with the shadow state restored.
 //
 // Device-dependent bits (spawn + shm) WARN-skip when the environment
 // cannot provide them; Linux CI supports both, so they run fully there.
@@ -69,6 +76,34 @@ std::unique_ptr<BridgedPlugin> try_spawn_clap(const std::string& plugin_id, std:
     config.plugin_path = NT_TEST_CLAP; // built fixture .clap (CMake define)
     config.plugin_id = plugin_id;
     return BridgedPlugin::spawn(config, error);
+}
+
+// Spawn a child hosting the deliberately-crashing effect fixture. The host
+// classifies it as an effect (has_input) or instrument (!has_input) to
+// exercise the bypass kind-split; the fixture itself is a stereo passthrough
+// (out = in * gain) with a param-armed abort() in its process(). Param
+// index 0 is "gain" (state), index 1 is the crash trigger.
+std::unique_ptr<BridgedPlugin> try_spawn_crash(bool has_input, std::string& error) {
+    BridgedPlugin::Config config;
+    config.sample_rate = 48000;
+    config.has_audio_input = has_input;
+    config.host_exe = NT_BRIDGE_HOST;
+    config.plugin_path = NT_TEST_CRASH_CLAP; // built crash fixture .clap
+    config.plugin_id = "nt.test.crash";
+    return BridgedPlugin::spawn(config, error);
+}
+
+// Drive the reaper until it confirms the child's death, bounded so a hang
+// fails rather than spins forever. Returns the frame count it took (or the
+// bound on timeout — the caller asserts the state).
+int reap_until_crashed(BridgedPlugin& plugin, int max_frames) {
+    for (int frame = 0; frame < max_frames; ++frame) {
+        if (plugin.poll_liveness() || plugin.live_state() == nt::ext::bridge::LiveState::kCrashed) {
+            return frame;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    return max_frames;
 }
 
 // Bounded spin on a predicate; returns its final value.
@@ -179,10 +214,18 @@ TEST_CASE("bridge host callback stays wait-free when the child is killed", "[bri
         REQUIRE(dt < 50ms); // wait-free: no unbounded stall on a hung/dead child
     }
 
-    // The output ring drains within a few blocks, after which the node
-    // emits pure silence — the deadline-miss policy (§A.5).
+    // Once the output ring drains and the heartbeat-staleness threshold
+    // trips, the node enters BYPASS. For an effect (has_audio_input) bypass
+    // is dry passthrough (§C.1) — a crashed insert must not punch a hole —
+    // so the output now equals the input. (Pre-S29c the dead pipeline
+    // drained to silence; S29c bypass supersedes that for effects.) The
+    // 256-block drive above is far past the 32-block threshold. Without a
+    // reaper poll here, the state stays kBypassed, not kCrashed.
     plugin->process_block(input.data(), output.data(), kFrames);
-    CHECK(peak(output) < 1e-6F);
+    for (const float sample : output) {
+        REQUIRE(std::abs(sample - 0.25F) < 1e-6F);
+    }
+    CHECK(plugin->live_state() == nt::ext::bridge::LiveState::kBypassed);
 }
 
 TEST_CASE("bridge process_block is allocation-free under RtScope", "[bridge]") {
@@ -303,4 +346,141 @@ TEST_CASE("bridge child that fails to load a plugin exits without hanging", "[br
     INFO(error);
     CHECK(dt < 3s); // bounded: no hang waiting on the failed child
     CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("bridge survives a child crash: bypass, reaper, saveable, restart", "[bridge]") {
+    // THE S29c EXIT CRITERION. A bridged effect crashes on command; assert
+    // the host callback stays wait-free (ASan-clean), output becomes dry
+    // passthrough, the reaper confirms death within a bounded number of
+    // frames, the session stays saveable from the shadow with the child
+    // dead, and restart() brings a fresh child back to live with the shadow
+    // state restored.
+    using nt::ext::bridge::LiveState;
+    std::string error;
+    auto plugin = try_spawn_crash(/*has_input=*/true, error);
+    if (!plugin) {
+        WARN("bridge spawn unavailable: " + error);
+        SKIP("bridge child could not be spawned in this environment");
+    }
+
+    // A constant non-zero input so passthrough vs gained-output is
+    // unmistakable regardless of the one-block pipeline latency.
+    std::array<float, kStereo> input{};
+    input.fill(0.3F);
+    std::array<float, kStereo> output{};
+
+    // Set a non-default gain (0.5) — restart must restore THIS, not the
+    // plugin default (1.0). Warm the pipeline so the child applies it.
+    plugin->plugin_set_param_cv(0, 0.5F); // index 0 = gain
+    for (int b = 0; b < 8; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(spin_wait([&] { return plugin->output_pending(); }, 500ms));
+    }
+    plugin->process_block(input.data(), output.data(), kFrames);
+    CHECK(peak(output) > 0.1F); // effect passes input*gain = 0.15 pre-crash
+    CHECK(plugin->live_state() == LiveState::kLive);
+
+    // Snapshot the shadow while the child is alive (the persistence path):
+    // it must be the fixture's gain (0.5) as a raw double.
+    const std::vector<std::uint8_t> shadow = plugin->save_state();
+    REQUIRE(shadow.size() == sizeof(double));
+    double shadow_gain = 0.0;
+    std::memcpy(&shadow_gain, shadow.data(), sizeof(double));
+    CHECK(std::abs(shadow_gain - 0.5) < 1e-6);
+
+    // Trigger the crash (index 1 armed > 0.5); the child aborts on the
+    // block it applies it. Drive on so the death manifests.
+    plugin->plugin_set_param_cv(1, 1.0F);
+    for (int b = 0; b < 8; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+    }
+
+    // (a) The host callback stays wait-free on the dead child, no fault
+    //     (this loop is the load-bearing assertion under ASan).
+    for (int b = 0; b < 256; ++b) {
+        const auto t0 = std::chrono::steady_clock::now();
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(std::chrono::steady_clock::now() - t0 < 50ms);
+    }
+
+    // (b) Output is bypass = dry passthrough for an effect (out == in),
+    //     driven by the audio thread's heartbeat-staleness check alone.
+    plugin->process_block(input.data(), output.data(), kFrames);
+    for (const float sample : output) {
+        REQUIRE(std::abs(sample - 0.3F) < 1e-6F);
+    }
+
+    // (c) The reaper confirms death within a bounded number of frames and
+    //     latches crashed (never on the audio thread).
+    const int frames_to_confirm = reap_until_crashed(*plugin, /*max_frames=*/200);
+    INFO("frames to confirm death: " << frames_to_confirm);
+    REQUIRE(frames_to_confirm < 200);
+    CHECK(plugin->live_state() == LiveState::kCrashed);
+
+    // (d) The session stays saveable with the child dead: the state path
+    //     returns the shadow (never a hang), matching the pre-crash capture.
+    const std::vector<std::uint8_t> saved_dead = plugin->save_state();
+    CHECK(saved_dead == shadow);
+
+    // Callback still wait-free and bypassing after the reaper latched.
+    for (int b = 0; b < 32; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+        for (const float sample : output) {
+            REQUIRE(std::abs(sample - 0.3F) < 1e-6F); // still dry passthrough
+        }
+    }
+
+    // (e) Restart brings a fresh child back to live producing correct audio,
+    //     with the SHADOW gain (0.5) restored — not the default (1.0).
+    REQUIRE(plugin->restart(error));
+    CHECK(plugin->live_state() == LiveState::kLive);
+    for (int b = 0; b < 8; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(spin_wait([&] { return plugin->output_pending(); }, 500ms));
+    }
+    plugin->process_block(input.data(), output.data(), kFrames);
+    for (const float sample : output) {
+        REQUIRE(std::abs(sample - 0.15F) < 1e-5F); // in * shadow gain 0.5
+    }
+}
+
+TEST_CASE("bridge crash bypass is silence for an instrument", "[bridge]") {
+    // The kind-split's other half (§C.1): a node the host treats as an
+    // instrument (no dry input) bypasses to SILENCE on a crash, even while a
+    // non-zero input signal is still being fed to it.
+    using nt::ext::bridge::LiveState;
+    std::string error;
+    auto plugin = try_spawn_crash(/*has_input=*/false, error);
+    if (!plugin) {
+        WARN("bridge spawn unavailable: " + error);
+        SKIP("bridge child could not be spawned in this environment");
+    }
+
+    std::array<float, kStereo> input{};
+    input.fill(0.4F);
+    std::array<float, kStereo> output{};
+
+    // Pre-crash the fixture passes input*gain (default 1.0), so audio flows
+    // even though the host classifies the node as an instrument.
+    for (int b = 0; b < 8; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(spin_wait([&] { return plugin->output_pending(); }, 500ms));
+    }
+    plugin->process_block(input.data(), output.data(), kFrames);
+    CHECK(peak(output) > 0.1F);
+
+    // Crash it and let the reaper confirm.
+    plugin->plugin_set_param_cv(1, 1.0F);
+    for (int b = 0; b < 72; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+    }
+    REQUIRE(reap_until_crashed(*plugin, /*max_frames=*/200) < 200);
+
+    // Bypass for an instrument is SILENCE — no dry passthrough — despite the
+    // non-zero input still being fed.
+    for (int b = 0; b < 8; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(peak(output) < 1e-6F);
+    }
+    CHECK(plugin->live_state() == LiveState::kCrashed);
 }

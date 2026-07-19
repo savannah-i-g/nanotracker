@@ -11,13 +11,28 @@
 // enters the kernel, or waits, under any child state (§A.1).
 //
 // S29b scope: the child hosts a real CLAP (bridge_host_main.cpp). This
-// binding now marshals the runner's per-block note/param events into the
-// input slot it publishes (see the event methods below — still wait-free,
-// just fixed-storage slot writes) and proxies plugin state save/load over
-// the control socket, off the RT path. Crash detection + restart and the
-// cross-process editor are later sub-stages. An empty Config::plugin_path
-// keeps the S29a echo/gain transport stand-in, which the pure-transport
-// tests still exercise.
+// binding marshals the runner's per-block note/param events into the input
+// slot it publishes (see the event methods below — still wait-free, just
+// fixed-storage slot writes) and proxies plugin state save/load over the
+// control socket, off the RT path.
+//
+// S29c scope (crash → bypass → restart): the binding OUTLIVES the child.
+// Three crash signals, none blocking the audio thread —
+//   1. heartbeat staleness, read lock-free in process_block: the ONLY
+//      liveness logic on the audio thread, a counter compare that flips
+//      output to BYPASS when the child stops advancing its heartbeat;
+//   2. a session-thread reaper (poll_liveness): waitpid confirms + reaps
+//      death and latches the CRASHED state that drives the badge/restart;
+//   3. control-socket EOF, corroborating on the session thread.
+// Bypass output is wait-free and kind-split (§C.1): effects pass the dry
+// input through, instruments go silent. restart() swaps only the child
+// process — the shm mapping, graph binding, bundle, and reclamation fence
+// are all untouched — and reloads a host-side shadow of the last-known-good
+// state so a fresh child restores meaningful state without ever calling
+// save_state on the corpse (the shadow also keeps the session saveable with
+// the child dead). The cross-process editor is a later sub-stage. An empty
+// Config::plugin_path keeps the S29a echo/gain transport stand-in, which the
+// pure-transport tests still exercise.
 #pragma once
 
 #include "audio/graph_runner.h"
@@ -32,13 +47,25 @@
 
 namespace nt::ext::bridge {
 
+// Node liveness the badge UI reads off-thread (S29d/e). The audio thread
+// flips kLive<->kBypassed lock-free from the heartbeat check; the reaper
+// latches kCrashed on confirmed death; only restart() clears it back to
+// kLive. Ordered by severity so a UI can compare. Host-side only (never on
+// the wire), so it takes the smallest base type that holds it.
+enum class LiveState : std::uint8_t {
+    kLive = 0,     // child healthy, producing output
+    kBypassed = 1, // heartbeat stale — audio thread is bypassing (recoverable)
+    kCrashed = 2,  // reaper-confirmed death — latched until restart()
+};
+
 class BridgedPlugin final : public audio::GraphPluginBinding {
 public:
     struct Config {
         std::uint32_t sample_rate = 48000;
-        // Effect (has dry input) vs instrument. Reserved for the S29c
-        // bypass semantics (dry-passthrough vs silence); the child also
-        // uses it implicitly via the hosted plugin's own port layout.
+        // Effect (has dry input) vs instrument. Drives the S29c bypass
+        // kind-split (§C.1): on a crash an effect passes its dry input
+        // through while an instrument goes silent. The child also uses the
+        // hosted plugin's own port layout implicitly.
         bool has_audio_input = false;
         // Real CLAP to host in the child. When plugin_path is set the
         // child opens the library and instantiates plugin_id; when it is
@@ -83,12 +110,42 @@ public:
     void plugin_reset() override;
 
     // ── Off the audio thread (host session thread) ───────────────────
-    // State proxy over the control socket (§C): save asks the child to
-    // serialise its plugin and returns the blob; load ships a blob for the
-    // child to apply. Blocking I/O — session thread only, never the audio
-    // thread. Empty/false in echo mode or on any transport failure.
+    // State proxy over the control socket (§C), shadow-backed. save_state
+    // refreshes the last-known-good shadow from the live child and always
+    // returns the shadow — so it stays valid (never a hang) even with a
+    // dead child, keeping the session saveable (§C.4). load_state ships a
+    // blob for the child to apply and adopts it as the shadow. Blocking
+    // I/O — session thread only, never the audio thread.
     [[nodiscard]] std::vector<std::uint8_t> save_state();
     bool load_state(const std::vector<std::uint8_t>& blob);
+
+    // Refresh the shadow from the live child without returning it (§C.4
+    // cadence: S29d/e calls this after an editor session closes and on an
+    // idle-dirty timer). No-op with a dead child. Returns whether it
+    // refreshed. Session thread; blocking control I/O.
+    bool capture_shadow();
+
+    // The last-known-good state the persistence layer reads and restart()
+    // reloads (§C.4). Session thread.
+    [[nodiscard]] const std::vector<std::uint8_t>& shadow_state() const { return shadow_state_; }
+
+    // ── Crash detection + restart (§C, session thread) ───────────────
+    // The badge/liveness readout the UI polls (never the RT path).
+    [[nodiscard]] LiveState live_state() const { return state_.load(std::memory_order_acquire); }
+
+    // Reaper — call once per app-loop frame. Confirms child death via
+    // waitpid(WNOHANG) (reaps the corpse) with control-socket EOF as a
+    // corroborating signal, and latches kCrashed. Returns true only on the
+    // frame it first transitions to crashed. Never on the audio thread.
+    bool poll_liveness();
+
+    // One-click restart (§C.3): reap the corpse, sanitise + reset the
+    // reused shm segment, respawn the child, reload the shadow state, and
+    // return to kLive. Only the child process swaps — the shm mapping,
+    // graph binding, bundle, and reclamation fence are untouched, so the
+    // audio thread keeps calling this same binding throughout. Precondition
+    // kCrashed; returns false with `error` set (stays crashed) on failure.
+    bool restart(std::string& error);
 
     // Wakes a parked child on the idle->active transition (§A.3). Never
     // called from process_block: waking is a syscall and the audio
@@ -109,9 +166,31 @@ public:
     [[nodiscard]] std::uint64_t dropped_input_blocks() const;
 
 private:
-    BridgedPlugin(BridgeShm shm, int pid, int control_fd, const Config& config);
+    BridgedPlugin(BridgeShm shm, const Config& config);
 
     void teardown() noexcept;
+
+    // Spawns (or respawns) the child against the already-mapped segment:
+    // builds argv from config_, sets up the control socket in CLAP mode,
+    // posix_spawns, and waits (bounded, off-RT) for child_ready. Sets pid_
+    // and control_fd_. Shared by the initial spawn() and restart().
+    bool spawn_child(std::string& error);
+
+    // Re-initialise the reused control block in place for a fresh child:
+    // re-write the version-first header and zero the ring indices +
+    // liveness words the untrusted dead child may have scribbled. Safe
+    // uncontended — the audio thread does not touch shm while kCrashed.
+    void reset_control_block();
+
+    // Bypass output stage (§C.1, wait-free): dry passthrough for an effect
+    // (has_audio_input), silence for an instrument. One memcpy or one fill;
+    // never touches the child.
+    void write_bypass(const float* in, float* out, std::uint32_t nsamp) const;
+
+    // Control-socket save/load exchange bodies (§C). Session thread,
+    // blocking; false on a dead/absent child, never a hang.
+    bool control_save(std::vector<std::uint8_t>& out);
+    bool control_load(const std::vector<std::uint8_t>& blob);
 
     // Acquires (once per block) the input slot that plugin_note_on/off and
     // plugin_set_param_cv append into; process_block fills the rest and
@@ -120,6 +199,7 @@ private:
     InSlot* open_input_slot();
 
     BridgeShm shm_;
+    Config config_; // retained for restart (path/id/rate/host_exe/gain)
     int pid_ = -1;
     int control_fd_ = -1; // host end of the state socketpair; -1 in echo mode
     std::uint64_t seq_ = 0;
@@ -130,6 +210,20 @@ private:
     InSlot* input_slot_ = nullptr;
     bool input_slot_open_ = false;
     bool pending_reset_ = false;
+
+    // Liveness state (§C.2). Read off-thread by the UI; written by the
+    // audio thread (kLive<->kBypassed via CAS that never leaves kCrashed)
+    // and the session thread (reaper ->kCrashed, restart ->kLive).
+    std::atomic<LiveState> state_{LiveState::kLive};
+
+    // Audio-thread-only heartbeat staleness tracking (§B.4 signal 1). Not
+    // atomic: touched solely in process_block, and quiescent while kCrashed
+    // (so restart resets them under the state handoff without a race).
+    std::uint64_t last_heartbeat_ = 0;
+    std::uint32_t stale_blocks_ = 0;
+
+    // Last-known-good state shadow (§C.4). Session thread only.
+    std::vector<std::uint8_t> shadow_state_;
 
     // Written on the audio thread (relaxed), read off-thread for diagnostics.
     std::atomic<std::uint64_t> dropped_notes_{0};

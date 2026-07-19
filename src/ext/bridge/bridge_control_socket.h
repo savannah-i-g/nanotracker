@@ -30,6 +30,8 @@
 
 #if defined(__linux__)
 #include <cerrno>
+#include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -101,6 +103,34 @@ inline bool control_read_full(int fd, void* buf, std::size_t len) {
         }
     }
     return true;
+}
+
+// Corroborating crash signal (§B.4 signal 3): true once the peer has closed
+// its end of the control socket — the child's death closes every fd it
+// holds, so a dead child shows up here as POLLHUP/EOF. Non-blocking and
+// non-destructive: it MSG_PEEKs at most one byte and never consumes reply
+// data, so it is safe to poll between save/load exchanges on the session
+// thread (the only thread that touches this socket). Never the audio
+// thread. A still-alive child reads as "not closed".
+inline bool control_peer_closed(int fd) {
+    if (fd < 0) {
+        return false;
+    }
+    pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
+    if (::poll(&pfd, 1, /*timeout_ms=*/0) <= 0) {
+        return false; // timeout or error: nothing to conclude
+    }
+    if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+        return true;
+    }
+    if ((pfd.revents & POLLIN) != 0) {
+        // Readable: either a reply (never pending here in lockstep) or EOF.
+        // Peek without consuming; a zero-length peek is the closed peer.
+        std::uint8_t byte = 0;
+        const ssize_t n = ::recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+        return n == 0;
+    }
+    return false;
 }
 
 #endif // __linux__
