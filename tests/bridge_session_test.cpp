@@ -48,7 +48,13 @@ using nt::ext::bridge::LiveState;
 // the test executable, which is correct in an install layout but not the
 // build tree.
 void use_test_bridge_host() {
+#ifdef _WIN32
+    // The bridge does not spawn on Windows (shm/fork stub), so the spawning
+    // tests SKIP there anyway; this only needs to compile.
+    ::_putenv_s("NT_BRIDGE_HOST_EXE", NT_BRIDGE_HOST);
+#else
     ::setenv("NT_BRIDGE_HOST_EXE", NT_BRIDGE_HOST, /*overwrite=*/1);
+#endif
 }
 
 // A bridged CLAP node, or empty when the environment can't spawn a child
