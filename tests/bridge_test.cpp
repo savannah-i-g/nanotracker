@@ -26,6 +26,7 @@
 //
 // Device-dependent bits (spawn + shm) WARN-skip when the environment
 // cannot provide them; Linux CI supports both, so they run fully there.
+#include "ext/bridge/bridge_control_socket.h"
 #include "ext/bridge/bridge_protocol.h"
 #include "ext/bridge/bridged_plugin.h"
 #include "ext/clap_host.h"
@@ -46,6 +47,8 @@
 
 #if defined(__linux__)
 #include <csignal>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -95,13 +98,17 @@ std::unique_ptr<BridgedPlugin> try_spawn_crash(bool has_input, std::string& erro
 
 // Drive the reaper until it confirms the child's death, bounded so a hang
 // fails rather than spins forever. Returns the frame count it took (or the
-// bound on timeout — the caller asserts the state).
+// bound on timeout — the caller asserts the state). The per-frame wait is
+// generous (not a tight 1 ms) so that under heavy parallel-test load — many
+// ctest workers each spawning a child — the crash-fixture's starved RT thread
+// still gets scheduled to hit its abort()ing block within the bound; a real
+// hang, where the child never dies, still exhausts the bound and fails.
 int reap_until_crashed(BridgedPlugin& plugin, int max_frames) {
     for (int frame = 0; frame < max_frames; ++frame) {
         if (plugin.poll_liveness() || plugin.live_state() == nt::ext::bridge::LiveState::kCrashed) {
             return frame;
         }
-        std::this_thread::sleep_for(1ms);
+        std::this_thread::sleep_for(5ms);
     }
     return max_frames;
 }
@@ -483,4 +490,163 @@ TEST_CASE("bridge crash bypass is silence for an instrument", "[bridge]") {
         REQUIRE(peak(output) < 1e-6F);
     }
     CHECK(plugin->live_state() == LiveState::kCrashed);
+}
+
+TEST_CASE("bridge editor control messages round-trip (open, window-id, close)",
+          "[bridge][editor]") {
+    // The display-INDEPENDENT core of the S29d editor path: the control-socket
+    // messages (open -> window-id -> close). A socketpair stands in for the
+    // control channel and a worker plays the child, servicing the editor
+    // messages with a MOCK window id (no real child, no X display). It proves
+    // the ControlMsg editor kinds, the header framing, and the EditorWindowInfo
+    // POD all agree on both ends — the wire contract the host and child share.
+#if defined(__linux__)
+    using nt::ext::bridge::ControlHeader;
+    using nt::ext::bridge::ControlMsg;
+    using nt::ext::bridge::EditorWindowInfo;
+    using nt::ext::bridge::kControlMagic;
+
+    std::array<int, 2> sv{-1, -1};
+    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv.data()) == 0);
+
+    constexpr std::uint64_t kMockWindow = 0x00ABCDEF12345678ULL;
+    constexpr std::uint32_t kW = 480;
+    constexpr std::uint32_t kH = 320;
+
+    // Worker (the "child"): read one request, reply; read another, reply. All
+    // Catch2 assertions stay on the main thread — the worker only records what
+    // it saw into locals read after join (a happens-before sync point).
+    std::uint32_t saw_open = 0;
+    std::uint32_t saw_close = 0;
+    bool worker_ok = true;
+    std::thread worker([&] {
+        ControlHeader req{};
+        if (!nt::ext::bridge::control_read_full(sv[1], &req, sizeof(req))) {
+            worker_ok = false;
+            return;
+        }
+        saw_open = req.type;
+        const EditorWindowInfo info{kMockWindow, kW, kH, 1};
+        const ControlHeader reply{kControlMagic,
+                                  static_cast<std::uint32_t>(ControlMsg::kOpenEditorReply),
+                                  static_cast<std::uint32_t>(sizeof(info)), 0};
+        worker_ok = nt::ext::bridge::control_write_full(sv[1], &reply, sizeof(reply)) &&
+                    nt::ext::bridge::control_write_full(sv[1], &info, sizeof(info));
+        if (!worker_ok) {
+            return;
+        }
+        ControlHeader creq{};
+        if (!nt::ext::bridge::control_read_full(sv[1], &creq, sizeof(creq))) {
+            worker_ok = false;
+            return;
+        }
+        saw_close = creq.type;
+        const ControlHeader creply{kControlMagic,
+                                   static_cast<std::uint32_t>(ControlMsg::kCloseEditorReply), 0, 0};
+        worker_ok = nt::ext::bridge::control_write_full(sv[1], &creply, sizeof(creply));
+        ::close(sv[1]);
+    });
+
+    // Host side: send open, read the window info back.
+    const ControlHeader open_req{kControlMagic,
+                                 static_cast<std::uint32_t>(ControlMsg::kOpenEditorRequest), 0, 0};
+    REQUIRE(nt::ext::bridge::control_write_full(sv[0], &open_req, sizeof(open_req)));
+    ControlHeader reply{};
+    REQUIRE(nt::ext::bridge::control_read_full(sv[0], &reply, sizeof(reply)));
+    CHECK(reply.type == static_cast<std::uint32_t>(ControlMsg::kOpenEditorReply));
+    CHECK(reply.status == 0);
+    REQUIRE(reply.length == sizeof(EditorWindowInfo));
+    EditorWindowInfo got{};
+    REQUIRE(nt::ext::bridge::control_read_full(sv[0], &got, sizeof(got)));
+    CHECK(got.window_id == kMockWindow);
+    CHECK(got.width == kW);
+    CHECK(got.height == kH);
+    CHECK(got.resizable == 1U);
+
+    // Host side: send close, read the ack.
+    const ControlHeader close_req{
+        kControlMagic, static_cast<std::uint32_t>(ControlMsg::kCloseEditorRequest), 0, 0};
+    REQUIRE(nt::ext::bridge::control_write_full(sv[0], &close_req, sizeof(close_req)));
+    ControlHeader close_reply{};
+    REQUIRE(nt::ext::bridge::control_read_full(sv[0], &close_reply, sizeof(close_reply)));
+    CHECK(close_reply.type == static_cast<std::uint32_t>(ControlMsg::kCloseEditorReply));
+
+    worker.join();
+    ::close(sv[0]);
+
+    CHECK(worker_ok);
+    CHECK(saw_open == static_cast<std::uint32_t>(ControlMsg::kOpenEditorRequest));
+    CHECK(saw_close == static_cast<std::uint32_t>(ControlMsg::kCloseEditorRequest));
+#else
+    SUCCEED("cross-process editor bridge is Linux-only (§H.2)");
+#endif
+}
+
+TEST_CASE("bridged editor embeds and survives a child crash while open", "[bridge][editor]") {
+    // The end-to-end §D exit check, display-gated: the child creates the plugin
+    // editor on its UI thread and hands back its X11 window id; the host
+    // reparents that foreign window into a host container. Then the child is
+    // crashed WHILE the editor is open — the risky path — and the host must
+    // survive (no X fatal, no hang) and tear the container down cleanly, then
+    // restart and reopen. WARN-skips headlessly (no X display -> the child
+    // cannot create the surface, open_editor fails), matching the CLAP-editor
+    // verification's headless posture.
+    using nt::ext::bridge::LiveState;
+    std::string error;
+    auto plugin = try_spawn_crash(/*has_input=*/true, error);
+    if (!plugin) {
+        WARN("bridge spawn unavailable: " + error);
+        SKIP("bridge child could not be spawned in this environment");
+    }
+    if (!plugin->open_editor(error)) {
+        WARN("cross-process editor unavailable (headless?): " + error);
+        SKIP("no X display for the cross-process editor");
+    }
+    CHECK(plugin->editor_open());
+
+    // Pump the host container a few frames — must never fault or hang.
+    for (int f = 0; f < 8; ++f) {
+        plugin->update_editor();
+        std::this_thread::sleep_for(2ms);
+    }
+    CHECK(plugin->editor_open());
+
+    // Warm the audio pipeline, then crash the child WHILE the editor is open.
+    std::array<float, kStereo> input{};
+    input.fill(0.3F);
+    std::array<float, kStereo> output{};
+    for (int b = 0; b < 4; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(spin_wait([&] { return plugin->output_pending(); }, 500ms));
+    }
+    plugin->plugin_set_param_cv(1, 1.0F); // arm the crash (index 1 > 0.5)
+    for (int b = 0; b < 8; ++b) {
+        plugin->process_block(input.data(), output.data(), kFrames);
+    }
+
+    // The host audio callback stays wait-free on the dead child (ASan-clean).
+    for (int b = 0; b < 128; ++b) {
+        const auto t0 = std::chrono::steady_clock::now();
+        plugin->process_block(input.data(), output.data(), kFrames);
+        REQUIRE(std::chrono::steady_clock::now() - t0 < 50ms);
+    }
+
+    // The reaper confirms death; THEN update_editor tears the container down
+    // without an X fatal or a hang against the now-destroyed foreign window.
+    REQUIRE(reap_until_crashed(*plugin, /*max_frames=*/200) < 200);
+    CHECK(plugin->live_state() == LiveState::kCrashed);
+    plugin->update_editor();            // <- the load-bearing survival step
+    CHECK_FALSE(plugin->editor_open()); // container gone, editor marked closed
+
+    // The host survived: restart brings a fresh child and the editor reopens.
+    REQUIRE(plugin->restart(error));
+    CHECK(plugin->live_state() == LiveState::kLive);
+    REQUIRE(plugin->open_editor(error));
+    CHECK(plugin->editor_open());
+    for (int f = 0; f < 4; ++f) {
+        plugin->update_editor();
+        std::this_thread::sleep_for(2ms);
+    }
+    plugin->close_editor();
+    CHECK_FALSE(plugin->editor_open());
 }

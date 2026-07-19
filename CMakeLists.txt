@@ -443,13 +443,19 @@ endif()
 # host with the engine/UI/device stripped away. VST3-in-child is S29e.
 # Linux-first (§H.2): on other platforms the sources compile to a
 # documented "unsupported" stub.
+# S29d: the child also links the unchanged editor-window + host-surface
+# sources so it can create the plugin editor on its own UI thread and hand
+# the X11 window id back to the host for cross-process reparenting (§D).
 add_executable(nanotracker-bridge-host
     src/ext/bridge/bridge_host_main.cpp
     src/ext/bridge/bridge_shm.cpp
     src/ext/clap_host.cpp
+    src/ext/editor_window.cpp
+    ${NT_EDITOR_SURFACE_SOURCE}
     src/platform/shared_library.cpp)
 target_include_directories(nanotracker-bridge-host PRIVATE src include)
-target_link_libraries(nanotracker-bridge-host PRIVATE clap ${CMAKE_DL_LIBS})
+target_link_libraries(nanotracker-bridge-host PRIVATE clap ${CMAKE_DL_LIBS}
+    $<$<BOOL:${UNIX}>:X11::X11>)
 if(MSVC)
     target_compile_options(nanotracker-bridge-host PRIVATE /W4 /utf-8)
 else()

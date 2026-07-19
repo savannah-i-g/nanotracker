@@ -2,6 +2,7 @@
 
 #include "ext/bridge/bridge_control_socket.h"
 #include "ext/bridge/bridge_protocol.h"
+#include "ext/editor_host_surface.h"
 
 #include <algorithm>
 #include <array>
@@ -215,6 +216,10 @@ bool BridgedPlugin::spawn_child(std::string& error) {
 }
 
 void BridgedPlugin::teardown() noexcept {
+    // Close any open editor first: tell the live child to destroy its editor
+    // (gui before window) and drop the host container, before the child is
+    // shut down below. A no-op when none is open or the child is already dead.
+    close_editor();
     // A crash-reaped child leaves pid_ == -1 but its dead control socket
     // still open (poll_liveness reaps the pid, not the fd) — always close
     // it so a never-restarted crashed node does not leak the descriptor.
@@ -313,6 +318,14 @@ bool BridgedPlugin::restart(std::string& error) {
         pid_ = -1;
     }
     close_fd(control_fd_); // drop the dead child's control socket
+
+    // The editor container, if still up, is stale: the child that owned the
+    // reparented foreign window is dead, so X has already destroyed that
+    // window. Drop the host container (destroys only our own window). Normally
+    // update_editor() has already done this on the kCrashed transition; this
+    // covers a restart driven without an intervening editor pump.
+    editor_container_.reset();
+    editor_child_window_ = 0;
 
     // 2) Sanitise + reset the reused segment in place. Uncontended: the
     //    audio thread is quiescent on shm while kCrashed.
@@ -745,6 +758,144 @@ bool BridgedPlugin::load_state(const std::vector<std::uint8_t>& blob) {
     }
     shadow_state_ = blob;
     return true;
+}
+
+// ── Cross-process editor exchanges over the control socket (§D) ──────
+// Session-thread, blocking request/reply — the same lockstep the state ops
+// use. control_open_editor fills `info` with the child's editor window id +
+// geometry; both mutate the CHILD (open/destroy its editor), not `this`, so
+// clang-tidy would offer to const them — kept non-const as I/O commands,
+// matching control_save/control_load.
+// NOLINTNEXTLINE(readability-make-member-function-const) — child-state I/O
+bool BridgedPlugin::control_open_editor(EditorWindowInfo& info) {
+#if defined(__linux__)
+    if (control_fd_ < 0) {
+        return false; // echo mode: no plugin, no editor
+    }
+    const ControlHeader request{.magic = kControlMagic,
+                                .type = static_cast<std::uint32_t>(ControlMsg::kOpenEditorRequest),
+                                .length = 0,
+                                .status = 0};
+    if (!control_write_full(control_fd_, &request, sizeof(request))) {
+        return false;
+    }
+    ControlHeader reply{};
+    if (!control_read_full(control_fd_, &reply, sizeof(reply))) {
+        return false;
+    }
+    if (reply.magic != kControlMagic ||
+        reply.type != static_cast<std::uint32_t>(ControlMsg::kOpenEditorReply) ||
+        reply.status != 0 || reply.length != sizeof(EditorWindowInfo)) {
+        return false; // child has no gui / no display, or a desync
+    }
+    return control_read_full(control_fd_, &info, sizeof(info));
+#else
+    (void)info;
+    return false;
+#endif
+}
+
+// NOLINTNEXTLINE(readability-make-member-function-const) — child-state I/O
+bool BridgedPlugin::control_close_editor() {
+#if defined(__linux__)
+    if (control_fd_ < 0) {
+        return false;
+    }
+    const ControlHeader request{.magic = kControlMagic,
+                                .type = static_cast<std::uint32_t>(ControlMsg::kCloseEditorRequest),
+                                .length = 0,
+                                .status = 0};
+    if (!control_write_full(control_fd_, &request, sizeof(request))) {
+        return false;
+    }
+    ControlHeader reply{};
+    if (!control_read_full(control_fd_, &reply, sizeof(reply))) {
+        return false;
+    }
+    return reply.magic == kControlMagic &&
+           reply.type == static_cast<std::uint32_t>(ControlMsg::kCloseEditorReply);
+#else
+    return false;
+#endif
+}
+
+// ── Cross-process editor (§D, session thread) ────────────────────────
+// The child owns the plugin editor on its own UI thread and X connection;
+// the host owns a container it reparents that foreign window into. The
+// cross-process reparent works because X11 window ids are display-global,
+// and the foreign-window lifetime is made safe by (1) the reaper-driven
+// teardown in update_editor() and (2) the guarded X error handler installed
+// when the container adopts the foreign window (editor_host_surface_x11.cpp).
+bool BridgedPlugin::open_editor(std::string& error) {
+    if (editor_container_ != nullptr) {
+        return true; // already open
+    }
+    if (state_.load(std::memory_order_acquire) != LiveState::kLive) {
+        error = "bridged plugin is not live";
+        return false;
+    }
+    EditorWindowInfo info{};
+    if (!control_open_editor(info)) {
+        error = "the bridge child could not open the plugin editor";
+        return false;
+    }
+    // Host-owned container, framed with the WM decorations and sized to the
+    // child's editor; the child's editor window is a foreign, cross-process
+    // X11 window reparented into it.
+    const std::string title = config_.plugin_id.empty() ? "Plugin Editor" : config_.plugin_id;
+    auto container =
+        ext::EditorHostSurface::open(title, info.width, info.height, info.resizable != 0, error);
+    if (container == nullptr) {
+        control_close_editor(); // undo the child-side editor (e.g. no host display)
+        return false;           // error set by open()
+    }
+    if (!container->adopt_foreign_child(static_cast<std::uintptr_t>(info.window_id))) {
+        error = "failed to reparent the plugin editor window (child gone?)";
+        control_close_editor();
+        return false; // container destroyed as it leaves scope
+    }
+    editor_child_window_ = static_cast<std::uintptr_t>(info.window_id);
+    editor_container_ = std::move(container);
+    return true;
+}
+
+void BridgedPlugin::update_editor() {
+    if (editor_container_ == nullptr) {
+        return;
+    }
+    // Reaper-confirmed death (§D.2): X destroyed the foreign editor window when
+    // the child's connection dropped. Tear down the host container — our own
+    // window only; the foreign window is already gone, so we never touch it.
+    // This is the crash-while-open teardown, and it cannot fault or hang.
+    if (state_.load(std::memory_order_acquire) == LiveState::kCrashed) {
+        editor_container_.reset();
+        editor_child_window_ = 0;
+        return;
+    }
+    // Pump the container's own events. It is host-owned, so this is safe even
+    // if the child just died: a racing foreign-window request is swallowed by
+    // the guarded X error handler installed on adopt.
+    if (!editor_container_->pump()) {
+        close_editor(); // user hit the container's WM close button
+        return;
+    }
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (editor_container_->take_resize(width, height)) {
+        editor_container_->resize_foreign_child(width, height); // relay to the embedded window
+    }
+}
+
+void BridgedPlugin::close_editor() {
+    if (editor_container_ == nullptr) {
+        return;
+    }
+    // Tell the child to destroy its editor (gui before window) BEFORE we drop
+    // the container, so the foreign window is gone first and we never destroy a
+    // window we do not own. A dead child makes this a harmless no-op.
+    control_close_editor();
+    editor_container_.reset();
+    editor_child_window_ = 0;
 }
 
 } // namespace nt::ext::bridge

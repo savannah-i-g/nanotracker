@@ -45,7 +45,13 @@
 #include <string>
 #include <vector>
 
+namespace nt::ext {
+class EditorHostSurface; // host-owned editor container (ext/editor_host_surface.h)
+} // namespace nt::ext
+
 namespace nt::ext::bridge {
+
+struct EditorWindowInfo; // ext/bridge/bridge_control_socket.h (open-editor reply payload)
 
 // Node liveness the badge UI reads off-thread (S29d/e). The audio thread
 // flips kLive<->kBypassed lock-free from the heartbeat check; the reaper
@@ -147,6 +153,32 @@ public:
     // kCrashed; returns false with `error` set (stays crashed) on failure.
     bool restart(std::string& error);
 
+    // ── Cross-process editor (§D, session thread; Linux/X11 only) ────────
+    // Opens the plugin's editor embedded in a host-owned container: the child
+    // creates the editor on its UI thread (the unchanged ClapEditorWindow) and
+    // returns its X11 window id over the control socket; the host reparents
+    // that foreign window into an EditorHostSurface container it owns and
+    // frames with the WM decorations. False with `error` set when the child is
+    // not live, has no editor channel (echo mode), the child could not create
+    // the editor (headless / no gui), or the reparent failed. Idempotent while
+    // open.
+    bool open_editor(std::string& error);
+
+    // Drives the container once per UI frame: relays user resize/close and,
+    // once the reaper has confirmed the child dead (live_state() == kCrashed),
+    // tears the container down — the foreign window is already gone with the
+    // child, so the host destroys only its own container and never touches the
+    // dead window (§D.2). Never faults or hangs on a dead child. Session
+    // thread; call it after poll_liveness() each frame.
+    void update_editor();
+
+    // Closes the editor: tells the child to destroy its editor (gui before
+    // window), then destroys the host container. Safe with a dead child (the
+    // child-side teardown becomes a no-op). Session thread.
+    void close_editor();
+
+    [[nodiscard]] bool editor_open() const { return editor_container_ != nullptr; }
+
     // Wakes a parked child on the idle->active transition (§A.3). Never
     // called from process_block: waking is a syscall and the audio
     // thread must not issue one. Cheap when the child is already hot.
@@ -192,6 +224,12 @@ private:
     bool control_save(std::vector<std::uint8_t>& out);
     bool control_load(const std::vector<std::uint8_t>& blob);
 
+    // Control-socket editor open/close exchanges (§D). Session thread,
+    // blocking; false on a dead/absent child. open fills `info` with the
+    // child's editor window id + geometry on success.
+    bool control_open_editor(EditorWindowInfo& info);
+    bool control_close_editor();
+
     // Acquires (once per block) the input slot that plugin_note_on/off and
     // plugin_set_param_cv append into; process_block fills the rest and
     // commits it. Null when the ring is full (child behind) — events for
@@ -224,6 +262,13 @@ private:
 
     // Last-known-good state shadow (§C.4). Session thread only.
     std::vector<std::uint8_t> shadow_state_;
+
+    // Host-owned editor container and the foreign (child-owned) editor window
+    // reparented into it (§D). Session thread only; null when no editor is
+    // open. The container's destructor detaches the guarded foreign window and
+    // destroys only the host's own window (never the foreign one).
+    std::unique_ptr<ext::EditorHostSurface> editor_container_;
+    std::uintptr_t editor_child_window_ = 0;
 
     // Written on the audio thread (relaxed), read off-thread for diagnostics.
     std::atomic<std::uint64_t> dropped_notes_{0};

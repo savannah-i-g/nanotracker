@@ -114,6 +114,22 @@ void EditorHostSurface::set_size(std::uint32_t width, std::uint32_t height) {
     expected_height_ = height;
 }
 
+void EditorHostSurface::sync() {
+    // Win32 has no per-connection request queue to flush; messages dispatch
+    // synchronously through the window procedure. Nothing to do.
+}
+
+bool EditorHostSurface::adopt_foreign_child(std::uintptr_t /*child_window*/) {
+    // Cross-process editor embedding on Win32 is deferred with the rest of the
+    // Windows bridge (§D.4 / §H.2): SetParent works cross-process but carries
+    // focus/activation quirks the Linux path avoids. Documented unsupported.
+    return false;
+}
+
+void EditorHostSurface::resize_foreign_child(std::uint32_t /*width*/, std::uint32_t /*height*/) {
+    // No foreign child is ever adopted on Win32 (see adopt_foreign_child).
+}
+
 bool EditorHostSurface::pump() {
     MSG msg;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast,performance-no-int-to-ptr)

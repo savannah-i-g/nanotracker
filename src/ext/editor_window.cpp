@@ -77,7 +77,19 @@ std::unique_ptr<ClapEditorWindow> ClapEditorWindow::open(ClapPlugin& plugin, std
     self->plugin_ = &plugin;
     self->surface_ = std::move(surface);
     self->gui_created_ = true;
+    self->width_ = width;
+    self->height_ = height;
+    self->resizable_ = resizable;
     return self;
+}
+
+void ClapEditorWindow::describe_for_reparent(std::uintptr_t& window, std::uint32_t& width,
+                                             std::uint32_t& height, bool& resizable) {
+    surface_->sync(); // materialise the window server-side before the host reparents it
+    window = surface_->native_handle();
+    width = width_;
+    height = height_;
+    resizable = resizable_;
 }
 
 ClapEditorWindow::~ClapEditorWindow() {

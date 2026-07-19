@@ -267,6 +267,89 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     return CLAP_PROCESS_CONTINUE;
 }
 
+/* ── gui (embeddable no-op editor, for the S29d bridge editor test) ────
+ * A minimal X11-embeddable gui that satisfies the CLAP gui contract so the
+ * host's ClapEditorWindow creates a REAL top-level surface window the
+ * out-of-process bridge reparents. The fixture draws nothing and needs no
+ * X11 of its own — the window under test is the host surface itself; the
+ * mechanism being exercised is the cross-process reparent + foreign-window
+ * lifetime on a child crash (§D), not plugin rendering. */
+static bool gui_is_api_supported(const clap_plugin_t* plugin, const char* api, bool is_floating) {
+    (void)plugin;
+    return !is_floating && strcmp(api, CLAP_WINDOW_API_X11) == 0;
+}
+static bool gui_get_preferred_api(const clap_plugin_t* plugin, const char** api,
+                                  bool* is_floating) {
+    (void)plugin;
+    *api = CLAP_WINDOW_API_X11;
+    *is_floating = false;
+    return true;
+}
+static bool gui_create(const clap_plugin_t* plugin, const char* api, bool is_floating) {
+    (void)plugin;
+    return !is_floating && strcmp(api, CLAP_WINDOW_API_X11) == 0;
+}
+static void gui_destroy(const clap_plugin_t* plugin) {
+    (void)plugin;
+}
+static bool gui_set_scale(const clap_plugin_t* plugin, double scale) {
+    (void)plugin;
+    (void)scale;
+    return true;
+}
+static bool gui_get_size(const clap_plugin_t* plugin, uint32_t* width, uint32_t* height) {
+    (void)plugin;
+    *width = 320;
+    *height = 240;
+    return true;
+}
+static bool gui_can_resize(const clap_plugin_t* plugin) {
+    (void)plugin;
+    return true;
+}
+static bool gui_adjust_size(const clap_plugin_t* plugin, uint32_t* width, uint32_t* height) {
+    (void)plugin;
+    (void)width;
+    (void)height;
+    return true;
+}
+static bool gui_set_size(const clap_plugin_t* plugin, uint32_t width, uint32_t height) {
+    (void)plugin;
+    (void)width;
+    (void)height;
+    return true;
+}
+static bool gui_set_parent(const clap_plugin_t* plugin, const clap_window_t* window) {
+    (void)plugin;
+    (void)window;
+    return true;
+}
+static bool gui_show(const clap_plugin_t* plugin) {
+    (void)plugin;
+    return true;
+}
+static bool gui_hide(const clap_plugin_t* plugin) {
+    (void)plugin;
+    return true;
+}
+static const clap_plugin_gui_t s_gui = {
+    .is_api_supported = gui_is_api_supported,
+    .get_preferred_api = gui_get_preferred_api,
+    .create = gui_create,
+    .destroy = gui_destroy,
+    .set_scale = gui_set_scale,
+    .get_size = gui_get_size,
+    .can_resize = gui_can_resize,
+    .get_resize_hints = NULL,
+    .adjust_size = gui_adjust_size,
+    .set_size = gui_set_size,
+    .set_parent = gui_set_parent,
+    .set_transient = NULL,
+    .suggest_title = NULL,
+    .show = gui_show,
+    .hide = gui_hide,
+};
+
 static const void* plugin_get_extension(const clap_plugin_t* plugin, const char* id) {
     (void)plugin;
     if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) {
@@ -277,6 +360,9 @@ static const void* plugin_get_extension(const clap_plugin_t* plugin, const char*
     }
     if (strcmp(id, CLAP_EXT_STATE) == 0) {
         return &s_state;
+    }
+    if (strcmp(id, CLAP_EXT_GUI) == 0) {
+        return &s_gui;
     }
     return NULL;
 }

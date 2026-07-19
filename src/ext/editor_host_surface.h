@@ -45,6 +45,30 @@ public:
     // window; the caller tears the plugin gui down, then this object.
     bool pump();
 
+    // Blocks until the server has processed this surface's outstanding
+    // requests (X11 XSync; a no-op elsewhere). The bridge child calls it so
+    // the editor window is materialised before its id crosses to the host for
+    // reparenting; the in-process path never needs it.
+    void sync();
+
+    // ── Cross-process editor embedding (S29d, §D; Linux/X11 only) ────────
+    // Reparents a FOREIGN window — one owned by another process (the bridge
+    // child) — into this surface as the container, and maps it to fill the
+    // client area. X11 window ids are display-global, so XReparentWindow works
+    // across the process boundary. Because the adopted window's owner may
+    // vanish mid-edit, a process-wide X error handler is installed that
+    // swallows protocol errors naming an adopted window, so a dead foreign
+    // window can never abort the host. Returns false if the reparent failed
+    // (foreign window already gone) or on a platform without cross-process
+    // embedding (Windows editor bridging is deferred, §H.2). The in-process
+    // editor path never adopts a foreign window, so it is unaffected.
+    bool adopt_foreign_child(std::uintptr_t child_window);
+
+    // Relays a container resize to the adopted foreign child so it fills the
+    // client area. No-op when nothing was adopted. A racing foreign-window
+    // error (child just died) is swallowed by the guarded error handler.
+    void resize_foreign_child(std::uint32_t width, std::uint32_t height);
+
     // Consumes a user-driven resize (client area) recorded since the
     // last call. Programmatic set_size echoes are filtered out, so a
     // true return is always the user's hand — callers renegotiate the
@@ -74,6 +98,9 @@ private:
     [[maybe_unused]] void* display_ = nullptr;      // X11 Display*; unused on Win32
     std::uintptr_t window_ = 0;                     // X11 Window / HWND
     [[maybe_unused]] std::uintptr_t wm_delete_ = 0; // X11 WM_DELETE_WINDOW atom; unused on Win32
+    // Foreign (cross-process) child reparented into this container, or 0.
+    // X11 only; unregistered from the error-handler guard set on destruction.
+    [[maybe_unused]] std::uintptr_t foreign_window_ = 0;
     EditorHostSurfaceState state_;
     bool resizable_ = false;
     std::uint32_t expected_width_ = 0; // last size we set programmatically

@@ -55,12 +55,22 @@ inline constexpr std::uint32_t kControlMaxPayload = 64U * 1024U * 1024U;
 // the matching kind; unknown kinds are a desync (the reader bails). The
 // underlying type mirrors the 32-bit ControlHeader.type field it is cast
 // into, so the wire width is explicit at the definition.
+//
+// S29d adds the editor kinds (§D). The editor lives in the CHILD, on its
+// UI thread; the host drives it entirely over this channel — open (child
+// creates the editor and hands back its native window id), close (child
+// tears the editor down), no unsolicited child->host traffic — so the
+// strict request/reply lockstep below is preserved.
 // NOLINTNEXTLINE(performance-enum-size) — width matches the wire field
 enum class ControlMsg : std::uint32_t {
-    kSaveRequest = 1U, // host -> child: no payload
-    kSaveReply = 2U,   // child -> host: payload = opaque plugin state blob
-    kLoadRequest = 3U, // host -> child: payload = opaque plugin state blob
-    kLoadReply = 4U,   // child -> host: no payload; status = applied ? 0 : 1
+    kSaveRequest = 1U,        // host -> child: no payload
+    kSaveReply = 2U,          // child -> host: payload = opaque plugin state blob
+    kLoadRequest = 3U,        // host -> child: payload = opaque plugin state blob
+    kLoadReply = 4U,          // child -> host: no payload; status = applied ? 0 : 1
+    kOpenEditorRequest = 5U,  // host -> child: no payload
+    kOpenEditorReply = 6U,    // child -> host: payload = EditorWindowInfo when status == 0
+    kCloseEditorRequest = 7U, // host -> child: no payload
+    kCloseEditorReply = 8U,   // child -> host: no payload; status 0
 };
 
 struct ControlHeader {
@@ -68,6 +78,18 @@ struct ControlHeader {
     std::uint32_t type = 0;   // ControlMsg
     std::uint32_t length = 0; // payload bytes following this header
     std::uint32_t status = 0; // reply status: 0 = ok, nonzero = error
+};
+
+// Payload of kOpenEditorReply (§D.2): the child's editor window and the
+// geometry the host sizes its container to. window_id is the X11 Window of
+// the surface ClapEditorWindow created in the child — display-global, so the
+// host can XReparentWindow it across the process boundary. POD only; both
+// ends share this definition, so there is no cross-toolchain layout risk.
+struct EditorWindowInfo {
+    std::uint64_t window_id = 0; // X11 Window (native handle) of the child's editor surface
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t resizable = 0; // 1 if the plugin gui reports can_resize
 };
 
 #if defined(__linux__)

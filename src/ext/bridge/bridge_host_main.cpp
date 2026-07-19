@@ -37,6 +37,7 @@
 #if defined(__linux__)
 
 #include "ext/clap_host.h"
+#include "ext/editor_window.h"
 
 #include <chrono>
 #include <memory>
@@ -221,14 +222,50 @@ void run_clap_rt_loop(ClapChild& st) {
     }
 }
 
-// The control thread (main): blocking request/reply over the inherited
-// socket. Save serialises the plugin and returns the blob; load applies a
-// blob. Both take the state lock so they never race the RT thread's
-// process(), and both run here on the child's main thread — the CLAP
-// contract's thread for state I/O. A closed socket (host teardown or
-// death) reads EOF and ends the loop, which shuts the child down.
+// Editor pump cadence (§D.3): while an editor is open the control thread
+// polls the socket with this timeout so the editor's per-frame pump — the
+// fd/timer/IRunLoop drive inside ClapEditorWindow::update() — runs ~60×/s
+// between control messages. 16 ms ≈ 60 Hz.
+constexpr int kEditorPumpPollMs = 16;
+
+// The control thread (main): request/reply over the inherited socket. Save
+// serialises the plugin and returns the blob; load applies one; the S29d
+// editor kinds open/close the plugin editor HERE, on the child's main/UI
+// thread (§D.1) — the CLAP main-thread, distinct from the RT thread, so the
+// audio path is never touched. State ops take the state lock so they never
+// race the RT thread's process(); the editor needs no such lock (CLAP allows
+// a main-thread gui concurrent with audio-thread process). A closed socket
+// (host teardown or death) reads EOF and ends the loop, which shuts the child
+// down; any editor still open is torn down as `editor` leaves scope
+// (ClapEditorWindow's destructor: plugin gui destroy before window destroy).
 void run_control_loop(int fd, ClapChild& st) {
+    std::unique_ptr<nt::ext::ClapEditorWindow> editor;
     for (;;) {
+        // With an editor open, interleave its per-frame pump with servicing
+        // control messages: poll with a frame timeout, pump on timeout, read a
+        // request when one arrives. With no editor there is nothing to pump, so
+        // block for the next request.
+        if (editor != nullptr) {
+            pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
+            const int pr = ::poll(&pfd, 1, kEditorPumpPollMs);
+            if (pr < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return;
+            }
+            if (pr == 0) { // no request this frame: pump the editor and loop
+                if (!editor->update()) {
+                    editor.reset(); // plugin/user closed the embedded gui
+                }
+                continue;
+            }
+            if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+                return; // host gone: `editor` tears down on scope exit
+            }
+            // POLLIN: fall through and read the pending request.
+        }
+
         ControlHeader header{};
         if (!control_read_full(fd, &header, sizeof(header))) {
             return; // EOF or error: host closed the socket
@@ -270,6 +307,50 @@ void run_control_loop(int fd, ClapChild& st) {
                                       .type = static_cast<std::uint32_t>(ControlMsg::kLoadReply),
                                       .length = 0,
                                       .status = applied ? 0U : 1U};
+            if (!control_write_full(fd, &reply, sizeof(reply))) {
+                return;
+            }
+            break;
+        }
+        case ControlMsg::kOpenEditorRequest: {
+            // Reuse the UNCHANGED in-process editor path (§D.1): it creates a
+            // bare top-level X11 surface, embeds the plugin via gui->set_parent,
+            // and its update() drives the fd/timer pump. The host reparents the
+            // surface window (id below) into its own container. A headless child
+            // (no X display) or a plugin without a gui yields status != 0, which
+            // the host reads as "no embedded editor" and falls back cleanly.
+            EditorWindowInfo info{};
+            std::uint32_t status = 1;
+            std::string editor_error;
+            editor = nt::ext::ClapEditorWindow::open(*st.plugin, editor_error);
+            if (editor != nullptr) {
+                std::uintptr_t window = 0;
+                bool resizable = false;
+                editor->describe_for_reparent(window, info.width, info.height, resizable);
+                info.window_id = window;
+                info.resizable = resizable ? 1U : 0U;
+                status = 0;
+            }
+            const ControlHeader reply{
+                .magic = kControlMagic,
+                .type = static_cast<std::uint32_t>(ControlMsg::kOpenEditorReply),
+                .length = (status == 0) ? static_cast<std::uint32_t>(sizeof(info)) : 0U,
+                .status = status};
+            if (!control_write_full(fd, &reply, sizeof(reply))) {
+                return;
+            }
+            if (status == 0 && !control_write_full(fd, &info, sizeof(info))) {
+                return;
+            }
+            break;
+        }
+        case ControlMsg::kCloseEditorRequest: {
+            editor.reset(); // gui destroy before window destroy (dtor order)
+            const ControlHeader reply{.magic = kControlMagic,
+                                      .type =
+                                          static_cast<std::uint32_t>(ControlMsg::kCloseEditorReply),
+                                      .length = 0,
+                                      .status = 0};
             if (!control_write_full(fd, &reply, sizeof(reply))) {
                 return;
             }
