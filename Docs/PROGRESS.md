@@ -3,6 +3,65 @@
 One entry per stage (or notable milestone), newest first. Format:
 date — stage — what landed — verification — backup filename.
 
+## 2026-07-19 — Stage 29 closed — Out-of-process plugin bridge; 1.2.0 (cycle 3 complete)
+
+- Landed over five verified sub-stages (design doc first:
+  `Plan_Cycle3/01-plugin-bridge-design.md`): external CLAP plugins can
+  host in a CHILD PROCESS, per-instance opt-in, so a plugin crash
+  bypasses the node and the tracker keeps playing.
+  - **S29a — shm transport** (`ext/bridge/`): wait-free SPSC block
+    rings in POSIX shared memory; the host audio callback only
+    push-or-drops and pop-or-silences — never allocs, syscalls or
+    waits, under any child state. The child-written ring index is
+    used only in a bounds-checked availability compare; slots are
+    indexed by the host's own masked cursor, so a dead or corrupt
+    child can never fault the host (verified in protocol.h + kill-
+    child ASan test).
+  - **S29b — real CLAP in the child**: the child links clap_host and
+    drives a live ClapPlugin; notes/params marshal in-place (wait-
+    free, counted overflow); a control socket proxies state save/load
+    off the RT path. Bridged output matches in-process within 1e-5
+    after the documented one-block (~2.67ms) latency.
+  - **S29c — crash → bypass → restart**: three detection signals off
+    the audio thread (lock-free heartbeat → bypass; session reaper
+    waitpid → latched kCrashed; socket EOF). Bypass is kind-split
+    (effect passthrough / instrument silence). Restart reaps, resets
+    the reused segment in place (uncontended — the audio thread stops
+    touching shm while kCrashed, verified), respawns, reloads the
+    host-side shadow state; graph/bundle/fence untouched. A
+    deliberately-crashing fixture proves survival under ASan.
+  - **S29d — cross-process X11 editor**: the child creates the editor
+    (unchanged ClapEditorWindow) on its own display and hands the
+    window id over the socket; the host reparents that foreign window
+    into its container. A resource-id-scoped X error handler swallows
+    errors naming an adopted window so a child dying mid-edit never
+    aborts the host (host destroys only its own container). Verified
+    live with ASan.
+  - **S29e — integration + UI + persistence**: a bridged node creates
+    a BridgedPlugin GraphPluginBinding (graph_runner + bridge
+    substrate byte-unchanged — the abstraction carried it); per-plugin
+    "run bridged (crash-isolated)" toggle (default off), live/
+    bypassed/crashed badge with one-click restart, XPLG additive
+    `bridged` flag (byte-identical to pre-S29e when nothing bridged —
+    back-compat test-proven). Locked decisions (§H): Linux-first,
+    best-effort SCHED_FIFO w/ silent fallback, one-block latency
+    documented. VST3-in-child DEFERRED (COM-across-crash risk;
+    toggle disabled-with-tooltip on VST3 nodes) — recorded, not
+    half-shipped.
+- Every sub-stage's load-bearing claim independently reviewed at the
+  orchestrator level (wait-free path, event ordering, crash-during-
+  restart, foreign-window handler, integration invariant), not taken
+  on the agent's summary. **Version 1.2.0** ships cycle 3.
+- Verification: 183/183 both trees (kill-child + crash-survival +
+  editor-crash all under ASan; bridged-vs-in-process match; XPLG
+  round-trip + back-compat; toggle/restart/persist at the session
+  level); tidy/format clean; CI green both platforms; crash-badge +
+  restart screenshot-verified in the live app.
+- Cycle 3 complete: debt paydown (25), undo panel (26), transient
+  slicing (27), project browser (28), plugin bridge (29).
+- Backup: `NanoTracker_stage29_2026-07-19.tar.gz`; git tags
+  `stage-29` + `v1.2.0`.
+
 ## 2026-07-18 — Stage 28 closed — Project browser + asset manager
 
 - Landed: **PROJECTS window** (`ui/projects_view`) — a Settings-

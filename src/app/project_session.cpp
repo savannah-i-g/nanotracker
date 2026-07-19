@@ -230,9 +230,14 @@ bool ProjectSession::load_ftrk(const std::filesystem::path& path) {
         bool restored = false;
         if (external.kind == 0) {
             if (load_clap_file(external.library_path)) {
-                const std::string node_id = add_clap_node(external.plugin_id);
+                const std::string node_id = add_clap_node(external.plugin_id, external.bridged);
                 if (!node_id.empty()) {
-                    if (ext::ClapPlugin* instance = clap_instance(node_id)) {
+                    // Restore into whichever binding materialised: the bridged
+                    // child if the spawn succeeded, else the in-process
+                    // fallback add_clap_node created (bridge unavailable here).
+                    if (ext::bridge::BridgedPlugin* bridge = bridged_plugin(node_id)) {
+                        bridge->load_state(external.state);
+                    } else if (ext::ClapPlugin* instance = clap_instance(node_id)) {
                         instance->load_state(external.state);
                     }
                     restored = true;
@@ -304,9 +309,29 @@ io::FtrkWriteExtras ProjectSession::assemble_write_extras() {
         const auto path_it = ext_path_by_node_.find(workspace_id);
         external.library_path = path_it != ext_path_by_node_.end() ? path_it->second : "";
         external.state = instance->save_state();
+        external.bridged = false;
         for (const ext::ClapParamInfo& param : instance->params()) {
             external.params.emplace_back(param.id, instance->param_value(param.id));
         }
+        extras.external.push_back(std::move(external));
+    }
+    // Bridged CLAP nodes: the state blob is the bridge's last-known-good
+    // shadow (save_state is safe even with a dead child, §C.4), keeping the
+    // session saveable through a crash. No param snapshot — the bridged
+    // binding does not enumerate params host-side; the shadow blob carries
+    // the plugin's real state. kind/id derive from the node (CLAP only in
+    // this release — bridged_by_node_ never holds VST3).
+    for (const auto& [workspace_id, binding] : bridged_by_node_) {
+        io::FtrkExternalPlugin external;
+        external.workspace_id = workspace_id;
+        external.kind = 0;
+        const graph::Node* node = workspace_.find_node(workspace_id);
+        external.plugin_id =
+            node != nullptr && node->plugin_id.size() > 5 ? node->plugin_id.substr(5) : "";
+        const auto path_it = ext_path_by_node_.find(workspace_id);
+        external.library_path = path_it != ext_path_by_node_.end() ? path_it->second : "";
+        external.state = binding->save_state();
+        external.bridged = true;
         extras.external.push_back(std::move(external));
     }
     for (const auto& [workspace_id, instance] : vst3_by_node_) {
@@ -319,6 +344,7 @@ io::FtrkWriteExtras ProjectSession::assemble_write_extras() {
         const auto path_it = ext_path_by_node_.find(workspace_id);
         external.library_path = path_it != ext_path_by_node_.end() ? path_it->second : "";
         external.state = instance->save_state();
+        external.bridged = false; // VST3-in-child is a follow-up (§F)
         for (const ext::Vst3ParamInfo& param : instance->params()) {
             external.params.emplace_back(param.id, instance->param_value(param.id));
         }
@@ -643,6 +669,15 @@ void ProjectSession::rebuild_workspace_nodes() {
     clap_editors_.clear();
     vst3_by_node_.clear();
     vst3_editors_.clear();
+    // The old runner still references these bindings until the caller's
+    // publish_bundle lands, so retire them behind that fence (staged now,
+    // stamped by the publish) rather than freeing under the audio thread —
+    // the same two-phase discipline decode_samples uses for buffers. Each
+    // child shuts down when the reclaimer frees the binding on a later sweep.
+    for (auto& [workspace_id, binding] : bridged_by_node_) {
+        reclaimer_.stage(std::move(binding));
+    }
+    bridged_by_node_.clear();
     preview_plugin_note_ = -1;
     workspace_.add_node(graph::make_tracker_bus_node(project_.channels));
     workspace_.add_node(graph::make_master_in_node());
@@ -826,6 +861,7 @@ bool ProjectSession::set_plugin_env_stage(const std::string& workspace_id,
 }
 
 void ProjectSession::preview_plugin_note(int slot, int midi_note, float velocity) {
+    wake_bridged_plugins(); // a parked bridged instrument must be hot for the audition
     if (preview_plugin_note_ >= 0) {
         audio_.send({.type = audio::Command::Type::kPluginNoteOff,
                      .value = 0.0F,
@@ -1126,13 +1162,17 @@ std::vector<ProjectSession::ClapCatalogEntry> ProjectSession::clap_catalog() con
     return catalog;
 }
 
-std::string ProjectSession::add_clap_node(const std::string& plugin_id) {
+std::string ProjectSession::add_clap_node(const std::string& plugin_id, bool bridged) {
     for (const auto& library : clap_libraries_) {
         for (const ext::ClapLibrary::Descriptor& descriptor : library->descriptors()) {
             if (descriptor.id != plugin_id) {
                 continue;
             }
             std::string clap_error;
+            // The in-process instance is created either way: when hosting
+            // in-process it IS the live binding; when bridging it enumerates
+            // the ports/params to build the node, then releases (the child
+            // hosts the live copy). Node construction is unchanged.
             auto instance = ext::ClapPlugin::create(
                 *library, plugin_id, audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000,
                 clap_error);
@@ -1173,9 +1213,29 @@ std::string ProjectSession::add_clap_node(const std::string& plugin_id) {
                 }
             }
             workspace_.add_node(std::move(node));
-            clap_by_node_[workspace_id] = instance.get();
             ext_path_by_node_[workspace_id] = library->path().string();
-            clap_instances_.push_back(std::move(instance));
+            const bool has_audio_input = instance->has_audio_input();
+            if (bridged) {
+                std::string spawn_error;
+                std::unique_ptr<ext::bridge::BridgedPlugin> binding =
+                    spawn_bridged_clap(library->path(), plugin_id, has_audio_input, spawn_error);
+                if (binding != nullptr) {
+                    bridged_by_node_[workspace_id] = std::move(binding);
+                    // instance released here — the child hosts the live copy.
+                } else {
+                    std::string warning = "external plugin \"";
+                    warning += plugin_id;
+                    warning += "\" bridge unavailable (";
+                    warning += spawn_error;
+                    warning += ") — running in-process";
+                    load_warnings_.push_back(std::move(warning));
+                    clap_by_node_[workspace_id] = instance.get();
+                    clap_instances_.push_back(std::move(instance));
+                }
+            } else {
+                clap_by_node_[workspace_id] = instance.get();
+                clap_instances_.push_back(std::move(instance));
+            }
             undo_.clear();
             publish_graph();
             return workspace_id;
@@ -1364,6 +1424,13 @@ void ProjectSession::bind_plugins(audio::GraphRunner& runner, audio::PlaybackBun
             runner.bind_plugin(static_cast<int>(n), it->second);
             continue;
         }
+        // Bridged nodes bind their out-of-process binding — a
+        // GraphPluginBinding like any other, so the runner is unchanged.
+        const auto bridged_it = bridged_by_node_.find(nodes[n].workspace_id);
+        if (bridged_it != bridged_by_node_.end()) {
+            runner.bind_plugin(static_cast<int>(n), bridged_it->second.get());
+            continue;
+        }
         const auto clap_it = clap_by_node_.find(nodes[n].workspace_id);
         if (clap_it != clap_by_node_.end()) {
             runner.bind_plugin(static_cast<int>(n), clap_it->second);
@@ -1385,6 +1452,9 @@ void ProjectSession::bind_plugins(audio::GraphRunner& runner, audio::PlaybackBun
         if (!entry.workspace_id.empty()) {
             binding = plugin_instance(entry.workspace_id);
             if (binding == nullptr) {
+                binding = bridged_plugin(entry.workspace_id);
+            }
+            if (binding == nullptr) {
                 binding = clap_instance(entry.workspace_id);
             }
             if (binding == nullptr) {
@@ -1400,6 +1470,171 @@ void ProjectSession::bind_plugins(audio::GraphRunner& runner, audio::PlaybackBun
             }
         }
         bundle.plugin_by_slot[i + 1] = binding;
+    }
+}
+
+// ── Out-of-process plugin bridge (Stage 29) ──────────────────────────────
+
+std::unique_ptr<ext::bridge::BridgedPlugin>
+ProjectSession::spawn_bridged_clap(const std::filesystem::path& library_path,
+                                   const std::string& plugin_id, bool has_audio_input,
+                                   std::string& error) {
+    ext::bridge::BridgedPlugin::Config config;
+    config.sample_rate = audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000;
+    config.has_audio_input = has_audio_input;
+    config.plugin_path = library_path;
+    config.plugin_id = plugin_id;
+    // host_exe left empty: BridgedPlugin resolves $NT_BRIDGE_HOST_EXE then a
+    // sibling of this executable.
+    return ext::bridge::BridgedPlugin::spawn(config, error);
+}
+
+ext::bridge::BridgedPlugin* ProjectSession::bridged_plugin(const std::string& workspace_id) const {
+    const auto it = bridged_by_node_.find(workspace_id);
+    return it != bridged_by_node_.end() ? it->second.get() : nullptr;
+}
+
+bool ProjectSession::is_external_plugin_node(const std::string& workspace_id) const {
+    const graph::Node* node = workspace_.find_node(workspace_id);
+    return node != nullptr && node->kind == graph::NodeKind::kPlugin &&
+           (node->plugin_id.starts_with("clap:") || node->plugin_id.starts_with("vst3:"));
+}
+
+bool ProjectSession::external_plugin_bridgeable(const std::string& workspace_id) const {
+    // CLAP only in this release — VST3-in-child is a follow-up (§F).
+    const graph::Node* node = workspace_.find_node(workspace_id);
+    return node != nullptr && node->plugin_id.starts_with("clap:");
+}
+
+bool ProjectSession::external_plugin_bridged(const std::string& workspace_id) const {
+    return bridged_by_node_.contains(workspace_id);
+}
+
+bool ProjectSession::set_external_plugin_bridged(const std::string& workspace_id, bool bridged) {
+    if (external_plugin_bridged(workspace_id) == bridged) {
+        return true; // already in the requested hosting mode
+    }
+    if (!external_plugin_bridgeable(workspace_id)) {
+        error_ = "only CLAP nodes can be bridged in this release";
+        return false;
+    }
+    const graph::Node* node = workspace_.find_node(workspace_id);
+    const std::string plugin_id = node->plugin_id.substr(5); // drop "clap:"
+    const auto path_it = ext_path_by_node_.find(workspace_id);
+    const std::filesystem::path library_path = path_it != ext_path_by_node_.end()
+                                                   ? std::filesystem::path{path_it->second}
+                                                   : std::filesystem::path{};
+    const bool has_audio_input =
+        std::any_of(node->inputs.begin(), node->inputs.end(),
+                    [](const graph::Port& port) { return port.kind == graph::PortKind::kAudio; });
+
+    if (bridged) {
+        // In-process → bridged. Snapshot the live state, spawn the child and
+        // seed it BEFORE mutating any registry, so a spawn failure leaves the
+        // node exactly as it was.
+        ext::ClapPlugin* current = clap_instance(workspace_id);
+        const std::vector<std::uint8_t> state =
+            current != nullptr ? current->save_state() : std::vector<std::uint8_t>{};
+        std::string spawn_error;
+        std::unique_ptr<ext::bridge::BridgedPlugin> binding =
+            spawn_bridged_clap(library_path, plugin_id, has_audio_input, spawn_error);
+        if (binding == nullptr) {
+            error_ = "bridge unavailable: " + spawn_error;
+            return false;
+        }
+        binding->load_state(state);
+        stop();
+        // The old ClapPlugin stays in clap_instances_ (freed at session
+        // teardown, as remove_workspace_node also leaves it) — the retired
+        // runner still references it until the publish below fences it out.
+        clap_by_node_.erase(workspace_id);
+        clap_editors_.erase(workspace_id);
+        bridged_by_node_[workspace_id] = std::move(binding);
+        publish_bundle();
+        return true;
+    }
+
+    // Bridged → in-process. Recreate the in-process instance from the shadow
+    // before mutating registries, then retire the bridged binding (and its
+    // child) behind the republish fence.
+    ext::bridge::BridgedPlugin* current = bridged_plugin(workspace_id);
+    const std::vector<std::uint8_t> state =
+        current != nullptr ? current->save_state() : std::vector<std::uint8_t>{};
+    ext::ClapLibrary* library = nullptr;
+    for (const auto& candidate : clap_libraries_) {
+        if (candidate->path() == library_path) {
+            library = candidate.get();
+            break;
+        }
+    }
+    if (library == nullptr) {
+        error_ = "CLAP library no longer catalogued: " + library_path.string();
+        return false;
+    }
+    std::string clap_error;
+    auto instance = ext::ClapPlugin::create(
+        *library, plugin_id, audio_.sample_rate() != 0 ? audio_.sample_rate() : 48000, clap_error);
+    if (instance == nullptr) {
+        error_ = clap_error;
+        return false;
+    }
+    instance->load_state(state);
+    stop();
+    std::unique_ptr<ext::bridge::BridgedPlugin> retired_bridge =
+        std::move(bridged_by_node_[workspace_id]);
+    bridged_by_node_.erase(workspace_id);
+    clap_by_node_[workspace_id] = instance.get();
+    clap_instances_.push_back(std::move(instance));
+    publish_bundle();
+    reclaimer_.retire(std::move(retired_bridge), publish_serial_);
+    return true;
+}
+
+bool ProjectSession::restart_bridged_plugin(const std::string& workspace_id) {
+    ext::bridge::BridgedPlugin* binding = bridged_plugin(workspace_id);
+    if (binding == nullptr) {
+        error_ = "no bridged plugin for \"" + workspace_id + "\"";
+        return false;
+    }
+    // restart() swaps only the child process — the binding, its graph
+    // binding and the reclamation fence are untouched, so no republish.
+    std::string restart_error;
+    if (!binding->restart(restart_error)) {
+        error_ = restart_error;
+        return false;
+    }
+    return true;
+}
+
+bool ProjectSession::open_bridged_editor(const std::string& workspace_id) {
+    ext::bridge::BridgedPlugin* binding = bridged_plugin(workspace_id);
+    if (binding == nullptr) {
+        error_ = "no bridged plugin for \"" + workspace_id + "\"";
+        return false;
+    }
+    std::string editor_error;
+    if (!binding->open_editor(editor_error)) {
+        error_ = editor_error;
+        return false;
+    }
+    return true;
+}
+
+bool ProjectSession::bridged_editor_open(const std::string& workspace_id) const {
+    const ext::bridge::BridgedPlugin* binding = bridged_plugin(workspace_id);
+    return binding != nullptr && binding->editor_open();
+}
+
+void ProjectSession::update_bridged() {
+    for (auto& [workspace_id, binding] : bridged_by_node_) {
+        binding->poll_liveness(); // reaper: confirm death, latch crashed for the badge
+        binding->update_editor(); // container pump / crash teardown (no-op when no editor)
+    }
+}
+
+void ProjectSession::wake_bridged_plugins() {
+    for (auto& [workspace_id, binding] : bridged_by_node_) {
+        binding->notify_active();
     }
 }
 
@@ -1537,15 +1772,28 @@ bool ProjectSession::remove_workspace_node(const std::string& workspace_id) {
     clap_editors_.erase(workspace_id);
     vst3_by_node_.erase(workspace_id);
     vst3_editors_.erase(workspace_id);
+    // A bridged node owns its binding here: extract it and retire it behind
+    // the republish fence below (the old runner still references it until
+    // the swap applies). Its child shuts down on the session thread when the
+    // reclaimer frees it, never on the audio thread.
+    std::unique_ptr<ext::bridge::BridgedPlugin> retired_bridge;
+    if (const auto it = bridged_by_node_.find(workspace_id); it != bridged_by_node_.end()) {
+        retired_bridge = std::move(it->second);
+        bridged_by_node_.erase(it);
+    }
     // Removal rips touching cables; history would need them restored in
     // order, so this clears (consistent with other structural edits).
     workspace_.remove_node(workspace_id);
     undo_.clear();
     publish_graph();
+    if (retired_bridge != nullptr) {
+        reclaimer_.retire(std::move(retired_bridge), publish_serial_);
+    }
     return true;
 }
 
 void ProjectSession::play() {
+    wake_bridged_plugins(); // idle->active: pull any parked child back up (§A.3)
     audio_.send({.type = audio::Command::Type::kTransportPlay,
                  .value = 0.0F,
                  .sample = nullptr,
@@ -1553,6 +1801,7 @@ void ProjectSession::play() {
 }
 
 void ProjectSession::play_from(int order_pos) {
+    wake_bridged_plugins();
     // kTransportPlay seeds order_pos from aux_int (engine clamps it).
     audio_.send({.type = audio::Command::Type::kTransportPlay, .aux_int = std::max(0, order_pos)});
 }

@@ -533,6 +533,12 @@ so old files load unbridged.
 Five sub-stages, each landing with green CI. Exit criteria are concrete
 and testable; the ritual (verify → ledgers → tar) is unchanged.
 
+**Status (2026-07-19): S29a–S29e landed.** a–d shipped the transport,
+real CLAP in the child, crash→bypass→restart, and the X11 cross-process
+editor. S29e made the bridge user-facing (session integration, opt-in
+toggle, crash badge + restart, XPLG persistence) — CLAP-only; VST3-in-
+child was **deferred** as a clean scope call (see S29e below and §G.8).
+
 ### S29a — IPC ring + echo child  ⚠ RISKIEST
 The shared-memory `ControlBlock` + SPSC block rings
 (`src/ext/bridge/shm_block_ring.h`, `bridge_protocol.h`), spawn + control
@@ -569,11 +575,32 @@ corrupting the host window tree (a read-only X-tree check like the
 existing editor verification, ../Plan_PostV1/09-plugin-platform.md line
 61).
 
-### S29e — opt-in UI + VST3-in-child + polish
-The settings + node-menu toggle, XPLG `bridged` persistence, VST3 through
-the same child, auto-param-panel fallback wiring, and doc/ledger updates
-(`ftrk-format.md`, `DEPENDENCIES.md`). **Exit:** toggling a plugin
-bridged/unbridged survives save→load; VST3 bridges; CI green.
+### S29e — opt-in UI + persistence + polish  ✅ landed (CLAP-only)
+The session integration (a `BridgedPlugin` bound into the graph in place
+of the in-process `ClapPlugin` at `add_clap_node`/XPLG-load time, a
+`bridged_by_node_` registry parallel to `clap_by_node_`, structural
+re-creation on toggle with the superseded binding retired behind the
+reclamation fence), the settings default + per-node opt-in toggle, the
+crash badge + one-click restart wired to `live_state()`/`restart()`, the
+per-frame `poll_liveness()`/`update_editor()` pump, and XPLG `bridged`
+persistence (an additive trailing flag run — back-compatible both ways).
+The auto-param panel falls back to the bridge status controls for a
+bridged node; live param edits on a bridged node are via the plugin's
+own (bridged) editor or CV cables (the RT path already reaches the
+child). **Exit met:** toggling bridged/in-process survives save→load;
+the crash→badge→restart path passes at the session level; CI green in
+both the plain and ASan builds.
+
+**VST3-in-child: deferred (§G.8).** The design put VST3-in-child here,
+but hosting VST3's COM-style `FUnknown` lifetime + `IRunLoop` in the
+child (mirroring the whole CLAP RT + control + editor loop for a second
+plugin kind, and linking `vst3_host`/`vst3_editor_window`/`vst3_run_loop`
+into the bridge host) is materially heavier than CLAP and would balloon
+this sub-stage with real destabilisation risk (COM refcounting across a
+child crash, IRunLoop threading in the child). CLAP bridging ships
+complete end-to-end; VST3 nodes show the toggle **disabled with a
+tooltip**. This is the honest call the sub-stage brief authorised rather
+than half-shipping VST3.
 
 **Riskiest: S29a.** It carries the novel, RT-critical, cross-process
 work — the shm ring, the deadline policy, and cross-process atomics. If
@@ -622,6 +649,25 @@ and tuning calls, not holes in that argument.
    permissions. Isolating a *malicious* plugin (seccomp/namespaces) is
    explicitly out of scope. The one hardening we do adopt is treating the
    child's shm indices/counts as untrusted (§A.4).
+8. **VST3-in-child (follow-up).** CLAP bridging shipped in S29e; VST3
+   bridging was deferred (rationale in §F/S29e). Landing it means: a
+   `Config` kind + a `"vst3"` child mode (argv + spawn), a
+   `run_vst3_child` mirroring `run_clap_child` (a `Vst3Plugin` RT loop,
+   COM lifetime managed on the child's main thread), the control loop's
+   save/load/editor generalised to `Vst3Plugin`/`Vst3EditorWindow` with
+   the child turning the `IRunLoop` each editor frame, and
+   `vst3_host`/`vst3_editor_window`/`vst3_run_loop` linked into the
+   bridge host. The host side (`BridgedPlugin`, the graph binding,
+   XPLG persistence, the toggle) is kind-agnostic and already carries
+   it; only the child + `Config` grow. Until then the toggle is
+   disabled-with-tooltip on VST3 nodes.
+9. **Live param editing on a bridged node (minor follow-up).** A bridged
+   node's auto-param sliders are replaced by the bridge status controls;
+   its params are edited through the plugin's own (bridged) editor or CV
+   cables (which already reach the child via the RT event path). A
+   main-thread param proxy over the control socket — for a headless
+   bridged plugin with no GUI — is a small future addition, not wired in
+   S29e to avoid widening the "complete" binding's RT surface.
 
 ---
 

@@ -33,6 +33,12 @@ private:
     // nodes); the caller dispatches removal after the draw loop.
     bool draw_node_window(app::ProjectSession& session, graph::Node& node, const Theme& theme,
                           int layout_generation);
+    // Draws the body of an external (CLAP/VST3) plugin node: the crash-
+    // isolation opt-in toggle, and — when bridged — the live/bypassed/
+    // crashed badge with a one-click restart and the cross-process editor,
+    // else the in-process auto-param panel and editor.
+    void draw_external_plugin_body(app::ProjectSession& session, graph::Node& node,
+                                   const Theme& theme);
     void draw_jack(const graph::Node& node, const graph::Port& port, bool is_input,
                    const Theme& theme);
     void draw_collapsed_jack_strip(const graph::Node& node);

@@ -17,6 +17,7 @@
 #include "audio/audio_engine.h"
 #include "audio/sample_reclaim.h"
 #include "engine/tracker_types.h"
+#include "ext/bridge/bridged_plugin.h"
 #include "ext/clap_host.h"
 #include "ext/editor_window.h"
 #include "ext/vst3_editor_window.h"
@@ -340,8 +341,12 @@ public:
 
     [[nodiscard]] std::vector<ClapCatalogEntry> clap_catalog() const;
 
-    // Instantiates a catalogued CLAP plugin as a workspace node.
-    std::string add_clap_node(const std::string& plugin_id);
+    // Instantiates a catalogued CLAP plugin as a workspace node. When
+    // `bridged` the live instance is hosted out-of-process (a BridgedPlugin
+    // bound into the graph instead of an in-process ClapPlugin); a spawn
+    // failure falls back to in-process with a load warning. The bridged
+    // choice persists per node in the FTRK XPLG block.
+    std::string add_clap_node(const std::string& plugin_id, bool bridged = false);
 
     // CLAP instance behind a workspace node (null for others).
     [[nodiscard]] ext::ClapPlugin* clap_instance(const std::string& workspace_id) const;
@@ -371,6 +376,43 @@ public:
     bool open_vst3_editor(const std::string& workspace_id);
     [[nodiscard]] bool vst3_editor_open(const std::string& workspace_id) const;
     void update_vst3_editors();
+
+    // ── Out-of-process plugin bridge (Stage 29) ──────────────────────
+    // Per-node opt-in that hosts a CLAP/VST3 instance in a child process
+    // so a plugin crash cannot take the tracker down. In-process stays
+    // the default; bridging is chosen per instance and persisted in XPLG.
+    // VST3-in-child is a follow-up (§F): only CLAP nodes are bridgeable
+    // in this release — is_external_plugin_node reports both kinds,
+    // external_plugin_bridgeable() reports which can actually bridge.
+    [[nodiscard]] bool is_external_plugin_node(const std::string& workspace_id) const;
+    [[nodiscard]] bool external_plugin_bridgeable(const std::string& workspace_id) const;
+    [[nodiscard]] bool external_plugin_bridged(const std::string& workspace_id) const;
+
+    // The bridged binding behind a node (null for in-process / non-bridged
+    // nodes). Exposes live_state()/heartbeat() for the workspace badge.
+    [[nodiscard]] ext::bridge::BridgedPlugin* bridged_plugin(const std::string& workspace_id) const;
+
+    // Flips a CLAP node between in-process and bridged, carrying its state
+    // across. Structural: the transport stops, the instance is re-created,
+    // the graph republishes and the superseded binding retires behind the
+    // reclamation fence (the graph_runner and the binding abstraction are
+    // untouched). Returns false with error() set (unknown node, VST3, or a
+    // spawn/create failure — the node keeps its current hosting on failure).
+    bool set_external_plugin_bridged(const std::string& workspace_id, bool bridged);
+
+    // One-click restart of a crashed bridged node (§C.3): only the child
+    // process is replaced — the binding, graph and fence are untouched.
+    bool restart_bridged_plugin(const std::string& workspace_id);
+
+    // Cross-process editor for a bridged node (§D) — the bridge's own
+    // reparented-container path, not the in-process ClapEditorWindow.
+    bool open_bridged_editor(const std::string& workspace_id);
+    [[nodiscard]] bool bridged_editor_open(const std::string& workspace_id) const;
+
+    // Per-frame pump for every bridged node: the reaper (poll_liveness,
+    // confirms death and drives the badge) and the editor container
+    // (update_editor). Called from the main loop beside update_clap_editors.
+    void update_bridged();
 
 private:
     void decode_samples();
@@ -402,6 +444,17 @@ private:
     void wake_dormant_plugins();
     // Binds plugin instances into a freshly-built runner + bundle.
     void bind_plugins(audio::GraphRunner& runner, audio::PlaybackBundle& bundle);
+    // Wakes any parked bridged child on the idle->active transition
+    // (§A.3) — a syscall, so off the audio thread only: transport start
+    // and note preview. A no-op when nothing is bridged / already hot.
+    void wake_bridged_plugins();
+    // Spawns a CLAP child for `library_path`/`plugin_id` at the device
+    // rate. Null with `error` set on spawn/shm failure (caller falls back
+    // to in-process). The bridge host resolves from $NT_BRIDGE_HOST_EXE
+    // then a sibling of this executable (ext/bridge/bridged_plugin.h).
+    std::unique_ptr<ext::bridge::BridgedPlugin>
+    spawn_bridged_clap(const std::filesystem::path& library_path, const std::string& plugin_id,
+                       bool has_audio_input, std::string& error);
 
     audio::AudioEngine& audio_;
     engine::TrackerProject project_;
@@ -435,6 +488,12 @@ private:
     std::vector<std::unique_ptr<ext::Vst3Plugin>> vst3_instances_;
     std::map<std::string, ext::Vst3Plugin*> vst3_by_node_;
     std::map<std::string, std::unique_ptr<ext::Vst3EditorWindow>> vst3_editors_;
+    // Out-of-process bridged nodes (Stage 29). A bridged node lives HERE
+    // instead of clap_by_node_ — the BridgedPlugin is a GraphPluginBinding
+    // all the same, so bind_plugins and the runner treat it identically.
+    // Owning: the binding outlives its child (restart swaps only the child),
+    // and a toggle retires the superseded binding through the reclaimer.
+    std::map<std::string, std::unique_ptr<ext::bridge::BridgedPlugin>> bridged_by_node_;
     std::map<std::string, std::string> ext_path_by_node_; // library paths for XPLG
     // POVR carries: a raw block the reader could not interpret, and
     // parsed entries whose instance never resolved at load (missing

@@ -72,6 +72,13 @@ struct FtrkExternalPlugin {
     // Parameter snapshot for degraded restore when the plugin is
     // missing (CLAP raw values / VST3 normalized).
     std::vector<std::pair<std::uint32_t, double>> params;
+    // Out-of-process bridging opt-in (Stage 29e). Stored as an additive
+    // trailing flag run after the record list (see io/ftrk_writer XPLG),
+    // so a file written before S29e — with no flag run — reads back as
+    // false = in-process, and a reader that predates the flag skips the
+    // trailing run untouched. Persists the per-node user choice; the
+    // bridged plugin's own state travels in `state` (the bridge's shadow).
+    bool bridged = false;
 };
 
 // Per-instance NTP state (XINS entry, v15). One record per plugin

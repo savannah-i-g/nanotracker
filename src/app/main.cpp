@@ -1241,6 +1241,10 @@ int main(int argc, char** argv) {
             }
             session.update_clap_editors();
             session.update_vst3_editors();
+            // Bridged nodes: the reaper (poll_liveness) confirms child death
+            // and drives the crash badge, and the editor container pumps —
+            // both off the audio thread, per bridged node, every frame.
+            session.update_bridged();
             session.sweep_retired();
             nt::platform::ImGuiHost::end_frame();
 

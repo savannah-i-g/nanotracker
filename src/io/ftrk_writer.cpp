@@ -392,6 +392,18 @@ std::vector<std::uint8_t> write_ftrk(const engine::TrackerProject& project,
                 out.f64(value);
             }
         }
+        // Additive `bridged` flag run (S29e): one byte per record, appended
+        // after the record list only when at least one record is bridged, so
+        // a project with no bridged plugins writes the pre-S29e byte layout
+        // unchanged. The reader consumes the run bounded by the block end
+        // (io/ftrk_reader parse_xplg); an older reader stops after the records
+        // and never touches it.
+        if (std::any_of(extras.external.begin(), extras.external.end(),
+                        [](const FtrkExternalPlugin& e) { return e.bridged; })) {
+            for (const FtrkExternalPlugin& external : extras.external) {
+                out.u8(external.bridged ? 1U : 0U);
+            }
+        }
     }
 
     // ── XINS (v15: per-instance NTP state) ───────────────────────────

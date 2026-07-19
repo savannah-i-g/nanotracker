@@ -390,13 +390,14 @@ void parse_pprs(Cursor c, std::size_t offset, FtrkExtras& extras) {
     extras.pprs_json = c.bytes_string(c.u32());
 }
 
-void parse_xplg(Cursor c, std::size_t offset, FtrkExtras& extras) {
+void parse_xplg(Cursor c, std::size_t offset, std::size_t end_bound, FtrkExtras& extras) {
     c.seek(offset);
     if (!magic_is(c, "XPLG")) {
         extras.warnings.emplace_back("XPLG: bad magic, block skipped");
         return;
     }
     const int count = c.u16();
+    const std::size_t first = extras.external.size();
     for (int i = 0; i < count; ++i) {
         FtrkExternalPlugin external;
         external.workspace_id = c.bytes_string(c.u16());
@@ -415,6 +416,18 @@ void parse_xplg(Cursor c, std::size_t offset, FtrkExtras& extras) {
             external.params.emplace_back(id, value);
         }
         extras.external.push_back(std::move(external));
+    }
+    // Additive `bridged` flag run (S29e): one byte per record, in record
+    // order, written only when at least one record is bridged. A file that
+    // predates the run leaves the cursor at the block end here, so nothing
+    // is read and every record keeps bridged = false. The end bound stops a
+    // present run from bleeding into the next block. Guard each read against
+    // the bound so a truncated run degrades to false rather than throwing.
+    for (std::size_t i = first; i < extras.external.size(); ++i) {
+        if (c.pos() >= end_bound) {
+            break;
+        }
+        extras.external[i].bridged = c.u8() != 0;
     }
 }
 
@@ -635,7 +648,17 @@ std::optional<FtrkReadResult> read_ftrk(const std::uint8_t* data, std::size_t si
             tolerant(extras, "PPRS", [&] { parse_pprs(Cursor(data, size), pprs_offset, extras); });
         }
         if (in_range(xplg_offset)) {
-            tolerant(extras, "XPLG", [&] { parse_xplg(Cursor(data, size), xplg_offset, extras); });
+            tolerant(extras, "XPLG", [&] {
+                // XPLG's trailing bridged-flag run is not self-delimiting, so
+                // its read needs the block end: the nearest following block
+                // offset (only XINS can follow in the writer's layout), else
+                // end of file.
+                std::size_t end_bound = size;
+                if (xins_offset > xplg_offset && xins_offset < end_bound) {
+                    end_bound = xins_offset;
+                }
+                parse_xplg(Cursor(data, size), xplg_offset, end_bound, extras);
+            });
         }
         if (in_range(xins_offset)) {
             tolerant(extras, "XINS", [&] { parse_xins(Cursor(data, size), xins_offset, extras); });

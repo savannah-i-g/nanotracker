@@ -31,6 +31,7 @@ add_executable(nt_tests
     povr_session_test.cpp
     clap_host_test.cpp
     bridge_test.cpp
+    bridge_session_test.cpp
     vst3_run_loop_test.cpp
     midi_test.cpp
     midi_record_test.cpp

@@ -44,6 +44,13 @@ struct Settings {
     // Piano roll: preview added/drawn notes through the layer instrument.
     bool piano_roll_audition = true;
 
+    // External (CLAP/VST3) plugins: default new instances to out-of-process
+    // bridging (Stage 29). Off by default — bridging costs one block of
+    // latency and is spent only where a plugin is actually flaky (§E/§H).
+    // The per-instance choice lives in the project (FTRK XPLG), not here;
+    // this only seeds the checkbox for freshly added external nodes.
+    bool bridge_external_by_default = false;
+
     int window_width = 1280;
     int window_height = 720;
 

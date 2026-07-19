@@ -160,61 +160,10 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
         // volume/pan/bypass at build).
         if (node.kind == graph::NodeKind::kPlugin) {
             ImGui::Separator();
-            if (ext::ClapPlugin* clap = session.clap_instance(node.workspace_id)) {
-                // External plugins get the auto-param panel (editor OS
-                // windows attach through the gui extension separately).
-                for (const ext::ClapParamInfo& param : clap->params()) {
-                    auto value = static_cast<float>(clap->param_value(param.id));
-                    // Display names may repeat ("Rate" et al); the
-                    // stable param id keys the widget.
-                    ImGui::PushID(static_cast<int>(param.id));
-                    ImGui::SetNextItemWidth(160.0F);
-                    if (ImGui::SliderFloat(param.name.c_str(), &value,
-                                           static_cast<float>(param.min),
-                                           static_cast<float>(param.max), "%.3f")) {
-                        clap->set_param(param.id, value);
-                    }
-                    ImGui::PopID();
-                }
-                if (clap->params().empty()) {
-                    ImGui::TextDisabled("no parameters");
-                }
-                if (session.clap_editor_open(node.workspace_id)) {
-                    ImGui::TextDisabled("editor open");
-                } else if (ImGui::SmallButton("open editor")) {
-                    if (!session.open_clap_editor(node.workspace_id)) {
-                        status_ = session.error();
-                        status_ttl_ = 6.0F;
-                    }
-                }
-            } else if (ext::Vst3Plugin* vst3 = session.vst3_instance(node.workspace_id)) {
-                int shown = 0;
-                for (const ext::Vst3ParamInfo& param : vst3->params()) {
-                    if (!param.automatable || shown >= 24) {
-                        continue; // synth params number in the hundreds
-                    }
-                    auto value = static_cast<float>(vst3->param_value(param.id));
-                    // Same duplicate-title hazard as the CLAP panel.
-                    ImGui::PushID(static_cast<int>(param.id));
-                    ImGui::SetNextItemWidth(160.0F);
-                    if (ImGui::SliderFloat(param.title.c_str(), &value, 0.0F, 1.0F, "%.3f")) {
-                        vst3->set_param(param.id, value);
-                    }
-                    ImGui::PopID();
-                    ++shown;
-                }
-                if (static_cast<int>(vst3->params().size()) > shown) {
-                    ImGui::TextDisabled("showing %d of %d parameters", shown,
-                                        static_cast<int>(vst3->params().size()));
-                }
-                if (session.vst3_editor_open(node.workspace_id)) {
-                    ImGui::TextDisabled("editor open");
-                } else if (ImGui::SmallButton("open editor")) {
-                    if (!session.open_vst3_editor(node.workspace_id)) {
-                        status_ = session.error();
-                        status_ttl_ = 6.0F;
-                    }
-                }
+            if (session.is_external_plugin_node(node.workspace_id)) {
+                // External CLAP/VST3: the bridge opt-in + (bridged) crash
+                // badge, else the in-process auto-param panel.
+                draw_external_plugin_body(session, node, theme);
             } else {
                 plugin_ui_.draw(session, node.workspace_id, theme);
             }
@@ -239,6 +188,129 @@ bool WorkspaceView::draw_node_window(app::ProjectSession& session, graph::Node& 
     ImGui::End();
 
     return closable && !open;
+}
+
+void WorkspaceView::draw_external_plugin_body(app::ProjectSession& session, graph::Node& node,
+                                              const Theme& theme) {
+    const std::string& ws = node.workspace_id;
+    const bool bridged = session.external_plugin_bridged(ws);
+
+    if (bridged) {
+        // The badge reads the bridge's live_state off the audio thread (the
+        // reaper drives the transition each frame in ProjectSession::
+        // update_bridged). Live is subtle; not-responding is amber; a
+        // reaper-confirmed crash is loud red with a one-click restart.
+        ext::bridge::BridgedPlugin* binding = session.bridged_plugin(ws);
+        const ext::bridge::LiveState state =
+            binding != nullptr ? binding->live_state() : ext::bridge::LiveState::kLive;
+        if (state == ext::bridge::LiveState::kLive) {
+            ImGui::TextColored(theme.primary, "[bridged]");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "hosted out-of-process — a crash here can't take down the tracker");
+            }
+        } else if (state == ext::bridge::LiveState::kBypassed) {
+            ImGui::TextColored(ImVec4{0.95F, 0.65F, 0.15F, 1.0F}, "plugin not responding");
+        } else { // kCrashed
+            ImGui::TextColored(ImVec4{0.96F, 0.26F, 0.26F, 1.0F}, "plugin crashed —");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Restart")) {
+                if (!session.restart_bridged_plugin(ws)) {
+                    status_ = session.error();
+                    status_ttl_ = 6.0F;
+                }
+            }
+        }
+        // Editor: the bridge's cross-process reparented container (S29d),
+        // not the in-process ClapEditorWindow.
+        if (session.bridged_editor_open(ws)) {
+            ImGui::TextDisabled("editor open");
+        } else if (ImGui::SmallButton("open editor")) {
+            if (!session.open_bridged_editor(ws)) {
+                status_ = session.error();
+                status_ttl_ = 6.0F;
+            }
+        }
+    } else if (ext::ClapPlugin* clap = session.clap_instance(ws)) {
+        // In-process CLAP: the auto-param panel (editor OS windows attach
+        // through the gui extension separately).
+        for (const ext::ClapParamInfo& param : clap->params()) {
+            auto value = static_cast<float>(clap->param_value(param.id));
+            // Display names may repeat ("Rate" et al); the stable param id
+            // keys the widget.
+            ImGui::PushID(static_cast<int>(param.id));
+            ImGui::SetNextItemWidth(160.0F);
+            if (ImGui::SliderFloat(param.name.c_str(), &value, static_cast<float>(param.min),
+                                   static_cast<float>(param.max), "%.3f")) {
+                clap->set_param(param.id, value);
+            }
+            ImGui::PopID();
+        }
+        if (clap->params().empty()) {
+            ImGui::TextDisabled("no parameters");
+        }
+        if (session.clap_editor_open(ws)) {
+            ImGui::TextDisabled("editor open");
+        } else if (ImGui::SmallButton("open editor")) {
+            if (!session.open_clap_editor(ws)) {
+                status_ = session.error();
+                status_ttl_ = 6.0F;
+            }
+        }
+    } else if (ext::Vst3Plugin* vst3 = session.vst3_instance(ws)) {
+        int shown = 0;
+        for (const ext::Vst3ParamInfo& param : vst3->params()) {
+            if (!param.automatable || shown >= 24) {
+                continue; // synth params number in the hundreds
+            }
+            auto value = static_cast<float>(vst3->param_value(param.id));
+            // Same duplicate-title hazard as the CLAP panel.
+            ImGui::PushID(static_cast<int>(param.id));
+            ImGui::SetNextItemWidth(160.0F);
+            if (ImGui::SliderFloat(param.title.c_str(), &value, 0.0F, 1.0F, "%.3f")) {
+                vst3->set_param(param.id, value);
+            }
+            ImGui::PopID();
+            ++shown;
+        }
+        if (static_cast<int>(vst3->params().size()) > shown) {
+            ImGui::TextDisabled("showing %d of %d parameters", shown,
+                                static_cast<int>(vst3->params().size()));
+        }
+        if (session.vst3_editor_open(ws)) {
+            ImGui::TextDisabled("editor open");
+        } else if (ImGui::SmallButton("open editor")) {
+            if (!session.open_vst3_editor(ws)) {
+                status_ = session.error();
+                status_ttl_ = 6.0F;
+            }
+        }
+    }
+
+    // Crash-isolation opt-in. Enabled on CLAP nodes; shown disabled on VST3
+    // (VST3-in-child is a planned follow-up). Flipping re-creates the
+    // instance bridged/in-process, carrying its state across.
+    const bool bridgeable = session.external_plugin_bridgeable(ws);
+    bool want = bridged;
+    if (!bridgeable) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Checkbox("run bridged (crash-isolated)", &want)) {
+        if (!session.set_external_plugin_bridged(ws, want)) {
+            status_ = session.error();
+            status_ttl_ = 6.0F;
+        }
+    }
+    if (!bridgeable) {
+        ImGui::EndDisabled();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(bridgeable ? "host this plugin in a separate process so a crash can't\n"
+                                       "take down the tracker. Adds ~2.67 ms (one block) of\n"
+                                       "latency; the plugin editor embeds on Linux only."
+                                     : "out-of-process hosting is CLAP-only in this release;\n"
+                                       "VST3-in-child is a planned follow-up");
+    }
 }
 
 bool WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settings& settings,
@@ -315,9 +387,19 @@ bool WorkspaceView::draw_control_window(app::ProjectSession& session, io::Settin
             ImGui::TextDisabled("(CLAP)");
             ImGui::SameLine();
             if (ImGui::SmallButton("add to workspace")) {
-                session.add_clap_node(entry.descriptor.id);
+                // New CLAP nodes seed from the global default; each node's
+                // choice is then editable on the node and saved in the project.
+                session.add_clap_node(entry.descriptor.id, settings.bridge_external_by_default);
             }
             ImGui::PopID();
+        }
+
+        // Global default for the per-node crash-isolation opt-in (§E/§H:
+        // off by default). The per-instance choice persists in the project.
+        ImGui::Checkbox("bridge external plugins by default", &settings.bridge_external_by_default);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("new CLAP/VST3 nodes start crash-isolated (out-of-process).\n"
+                              "Off by default — bridging adds one block of latency.");
         }
 
         if (status_ttl_ > 0.0F && !status_.empty()) {

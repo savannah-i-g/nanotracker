@@ -500,3 +500,26 @@ detail as each fix lands.
   carry no actionable verb. The recursive listing is bounded (depth and
   entry caps) and cached per root-set — never an unbounded synchronous
   walk each frame.
+- **Out-of-process plugin bridge (new native capability, not a web
+  divergence)** — the web app had no plugin isolation of any kind; a
+  crashing plugin took the tab down. Stage 29 adds a per-instance,
+  opt-in bridge (`ext/bridge/*`, `Docs/Plan_Cycle3/01-plugin-bridge-
+  design.md`): a CLAP plugin can be hosted in a child process so a crash
+  cannot take the tracker down. The audio thread never blocks on the
+  child — it does wait-free shared-memory ring traffic only, reading the
+  child's output from one block earlier, so bridging costs exactly one
+  graph block (~2.67 ms at 48 kHz / 128 frames) of latency and nothing
+  else (uncompensated; documented, not hidden). On a crash the audio
+  thread sees "no fresh output" and bypasses instantly — dry passthrough
+  for an effect, silence for an instrument — while a session-thread
+  reaper confirms the death, raises a loud node badge, and arms a
+  one-click restart that swaps only the child (the graph binding and the
+  reclamation fence are untouched); the session stays saveable through
+  the crash from a host-side state shadow. In-process remains the
+  default, and the choice persists per node in the FTRK XPLG block (an
+  additive `bridged` flag; files without it load in-process). Scope: it
+  is *crash* isolation, not a security sandbox — the child runs plugin
+  code with the user's own permissions (seccomp/namespaces are out of
+  scope). v1 is Linux-first, complete (shm IPC + crash/bypass/restart +
+  X11 cross-process reparented editor), CLAP only; VST3-in-child and the
+  Windows editor bridge are recorded follow-ups (design doc §E/§F).

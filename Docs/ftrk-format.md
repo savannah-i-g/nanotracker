@@ -129,6 +129,19 @@ length + bytes + u32 controller-stream length + bytes), paramCount
 u16 × { id u32, value f64 } — the parameter snapshot for degraded
 restore when the plugin is missing on load.
 
+**Bridged flag (S29e, additive).** When at least one record is
+out-of-process bridged, a trailing run of `count` u8 flags (one per
+record, in record order, 0 = in-process, 1 = bridged) follows the
+record list, bounded by the block end. A file with nothing bridged
+writes no run at all, so the byte layout is identical to a pre-S29e
+XPLG block — a reader that predates the flag stops after the records
+and never touches the run, and a reader that expects it defaults every
+record to in-process when the run is absent (back-compatible both
+ways, no version bump). A bridged record's `state` blob is the bridge's
+last-known-good state shadow; its paramCount is 0 (the bridged binding
+does not enumerate params host-side). Bridging is Linux + CLAP only in
+this release.
+
 ### XINS — per-instance NTP state (v15, native)
 `XINS`, blockVersion u8 (1), count u16; per NTP plugin instance:
 workspaceId str16, then envStageCount u16 × { nodeId str16, stageIndex

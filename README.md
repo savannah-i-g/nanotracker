@@ -40,6 +40,9 @@ and records the divergence in [Docs/FIXES.md](Docs/FIXES.md).
 - Plugin hosting three ways: the declarative NTP format (MIT-licensed
   headers, samplers, wavetables, granular, native DSP stages), CLAP,
   and VST3, with native editor windows for both external formats
+- Optional out-of-process hosting (Linux): bridge a CLAP plugin into a
+  child process per-instance so a crash bypasses the node and keeps
+  playing, with a loud badge and one-click restart
 - Sampler platform: user-assignable sample slots that travel inside
   project files, MPC-style slice maps, destructive waveform editing
   with undo
